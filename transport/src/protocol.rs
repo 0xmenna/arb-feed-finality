@@ -2,6 +2,7 @@ use clap::ValueEnum;
 use libp2p::StreamProtocol;
 
 pub const BLOCKS_TOPIC: &str = "/iceberg/blocks/1.0.0";
+pub const FEED_TOPIC: &str = "/iceberg/feed/1.0.0";
 
 pub const ID_PROTOCOL: &str = "/iceberg/1.0.0";
 
@@ -15,7 +16,7 @@ pub enum Network {
     Mainnet,
 }
 
-pub const KNOWN_TOPICS: [&'static str; 1] = [BLOCKS_TOPIC];
+pub const KNOWN_TOPICS: [&'static str; 2] = [BLOCKS_TOPIC, FEED_TOPIC];
 
 pub const fn dht_protocol(network: Network) -> StreamProtocol {
     match network {

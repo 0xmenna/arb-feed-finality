@@ -4,7 +4,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use behaviour::{base::{BaseBehaviour, BaseBehaviourEvent}, wrapped::Wrapped};
+use behaviour::{
+    base::{BaseBehaviour, BaseBehaviourEvent},
+    wrapped::Wrapped,
+};
 use builder::P2PTransportBuilder;
 use cli::TransportArgs;
 use futures::StreamExt;
@@ -90,6 +93,8 @@ pub type Publisher = Sender<(&'static str, Bytes)>;
 
 /// It registers a new handler for incoming messages from a subscribed topic
 pub type RegisterHandler<Handler> = Sender<(&'static str, Handler)>;
+
+
 
 pub struct P2PTransport<Handler: MessageHandler> {
     /// The swarm on top of which the node operates
