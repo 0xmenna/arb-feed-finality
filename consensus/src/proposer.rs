@@ -1,18 +1,20 @@
 use crate::config::{Committee, Stake};
-use crate::consensus::{ConsensusMessage, Round};
-use crate::messages::{Block, QC, TC};
+use crate::consensus::{Checkpoint, ConsensusMessage, ParentRound, Round};
+use crate::messages::{Block, QC};
 use bytes::Bytes;
+use codec::Encode;
 use crypto::{Digest, PublicKey, SignatureService};
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
 use log::{debug, info};
-use network::{CancelHandler, ReliableSender};
 use std::collections::HashSet;
 use tokio::sync::mpsc::{Receiver, Sender};
+use transport::protocol::BLOCK_PROPOSALS_TOPIC;
+use transport::{CancelHandler, Publisher};
 
 #[derive(Debug)]
 pub enum ProposerMessage {
-    Make(Round, QC, Option<TC>),
+    Make(Round, QC),
     Cleanup(Vec<Digest>),
 }
 
@@ -20,11 +22,10 @@ pub struct Proposer {
     name: PublicKey,
     committee: Committee,
     signature_service: SignatureService,
-    rx_mempool: Receiver<Digest>,
     rx_message: Receiver<ProposerMessage>,
     tx_loopback: Sender<Block>,
     buffer: HashSet<Digest>,
-    network: ReliableSender,
+    network_publisher: Publisher,
 }
 
 impl Proposer {
@@ -32,20 +33,19 @@ impl Proposer {
         name: PublicKey,
         committee: Committee,
         signature_service: SignatureService,
-        rx_mempool: Receiver<Digest>,
         rx_message: Receiver<ProposerMessage>,
         tx_loopback: Sender<Block>,
+        tx_publisher: Publisher,
     ) {
         tokio::spawn(async move {
             Self {
                 name,
                 committee,
                 signature_service,
-                rx_mempool,
                 rx_message,
                 tx_loopback,
                 buffer: HashSet::new(),
-                network: ReliableSender::new(),
+                network_publisher: tx_publisher,
             }
             .run()
             .await;
@@ -58,43 +58,45 @@ impl Proposer {
         deliver
     }
 
-    async fn make_block(&mut self, round: Round, qc: QC, tc: Option<TC>) {
+    async fn make_block(
+        &mut self,
+        checkpoint: Checkpoint,
+        round: Round,
+        parent_round: ParentRound,
+        last_feed_sequence_number: u64,
+        batch_poster_digest: Digest,
+        feed_merkle_root: Digest,
+        qc: QC,
+    ) {
         // Generate a new block.
         let block = Block::new(
             qc,
-            tc,
-            self.name,
+            checkpoint,
             round,
-            /* payload */ self.buffer.drain().collect(),
+            parent_round,
+            last_feed_sequence_number,
+            batch_poster_digest,
+            feed_merkle_root,
             self.signature_service.clone(),
         )
         .await;
 
-        if !block.payload.is_empty() {
-            info!("Created {}", block);
+        info!("Created {}", block);
 
-            #[cfg(feature = "benchmark")]
-            for x in &block.payload {
-                // NOTE: This log entry is used to compute performance.
-                info!("Created {} -> {:?}", block, x);
-            }
-        }
-        debug!("Created {:?}", block);
+        // #[cfg(feature = "benchmark")]
+        // for x in &block.payload {
+        //     // NOTE: This log entry is used to compute performance.
+        //     info!("Created {} -> {:?}", block, x);
+        // }
 
         // Broadcast our new block.
         debug!("Broadcasting {:?}", block);
-        let (names, addresses): (Vec<_>, _) = self
-            .committee
-            .broadcast_addresses(&self.name)
-            .iter()
-            .cloned()
-            .unzip();
-        let message = bincode::serialize(&ConsensusMessage::Propose(block.clone()))
-            .expect("Failed to serialize block");
-        let handles = self
-            .network
-            .broadcast(addresses, Bytes::from(message))
-            .await;
+        let message = ConsensusMessage::Propose(block.clone()).encode();
+
+        self.network_publisher
+            .send((BLOCK_PROPOSALS_TOPIC, Bytes::from(message)))
+            .await
+            .expect("Failed to send block");
 
         // Send our block to the core for processing.
         self.tx_loopback

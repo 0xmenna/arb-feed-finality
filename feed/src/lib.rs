@@ -1,3 +1,3 @@
-mod batch_maker;
-mod processor;
-mod source;
+pub mod batch_maker;
+pub mod processor;
+pub mod source;

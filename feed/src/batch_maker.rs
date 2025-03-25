@@ -164,6 +164,30 @@ pub struct BatchMaker {
 }
 
 impl BatchMaker {
+    pub fn spawn(
+        max_size: usize,
+        max_rounds: Round,
+        batchposter_pos: BatchPosterPosition,
+        rx_mini_batch: Receiver<MiniBatchFeed>,
+        store: Store,
+        tx_result: Sender<BatchMakerResult>,
+        rx_commit_batch: Receiver<Digest>,
+    ) {
+        tokio::spawn(async move {
+            Self {
+                max_size,
+                max_rounds,
+                batchposter_pos,
+                rx_mini_batch,
+                store,
+                tx_result,
+                rx_commit_batch,
+            }
+            .run()
+            .await;
+        });
+    }
+
     async fn run(&mut self) {
         debug!(
             "BatchMaker starting from batch position: {:?}",

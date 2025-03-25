@@ -19,7 +19,10 @@ use libp2p::{
 };
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::{
+    mpsc::{channel, Receiver, Sender},
+    oneshot,
+};
 
 pub mod behaviour;
 pub mod builder;
@@ -94,7 +97,8 @@ pub type Publisher = Sender<(&'static str, Bytes)>;
 /// It registers a new handler for incoming messages from a subscribed topic
 pub type RegisterHandler<Handler> = Sender<(&'static str, Handler)>;
 
-
+/// Convenient alias for cancel handlers returned to the caller task.
+pub type CancelHandler = oneshot::Receiver<Bytes>;
 
 pub struct P2PTransport<Handler: MessageHandler> {
     /// The swarm on top of which the node operates
@@ -142,7 +146,7 @@ impl<Handler: MessageHandler> P2PTransport<Handler> {
     pub async fn run(&mut self) {
         loop {
             tokio::select! {
-                // Handle incoming handler registration
+                // Handle incoming handler registration requests
                 Some((topic, handler)) = self.rx_handlers.recv() => {
                     if self.topics.get(topic).is_none() {
                         // Topic is not known so subscribe to topic, add to known topics and add handler

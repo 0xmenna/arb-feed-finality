@@ -10,14 +10,15 @@ use crate::synchronizer::Synchronizer;
 use crate::timer::Timer;
 use async_recursion::async_recursion;
 use bytes::Bytes;
+use codec::Encode;
 use crypto::Hash as _;
 use crypto::{PublicKey, SignatureService};
 use log::{debug, error, info, warn};
-use network::SimpleSender;
 use std::cmp::max;
 use std::collections::VecDeque;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
+use transport::Publisher;
 
 #[cfg(test)]
 #[path = "tests/core_tests.rs"]
@@ -28,9 +29,7 @@ pub struct Core {
     committee: Committee,
     store: Store,
     signature_service: SignatureService,
-    leader_elector: LeaderElector,
-    mempool_driver: MempoolDriver,
-    synchronizer: Synchronizer,
+    leader: PublicKey,
     rx_message: Receiver<ConsensusMessage>,
     rx_loopback: Receiver<Block>,
     tx_proposer: Sender<ProposerMessage>,
@@ -39,9 +38,8 @@ pub struct Core {
     last_voted_round: Round,
     last_committed_round: Round,
     high_qc: QC,
-    timer: Timer,
     aggregator: Aggregator,
-    network: SimpleSender,
+    network_publisher: Publisher,
 }
 
 impl Core {
@@ -51,14 +49,12 @@ impl Core {
         committee: Committee,
         signature_service: SignatureService,
         store: Store,
-        leader_elector: LeaderElector,
-        mempool_driver: MempoolDriver,
-        synchronizer: Synchronizer,
-        timeout_delay: u64,
+        leader: PublicKey,
         rx_message: Receiver<ConsensusMessage>,
         rx_loopback: Receiver<Block>,
         tx_proposer: Sender<ProposerMessage>,
         tx_commit: Sender<Block>,
+        tx_publisher: Publisher,
     ) {
         tokio::spawn(async move {
             Self {
@@ -66,9 +62,7 @@ impl Core {
                 committee: committee.clone(),
                 signature_service,
                 store,
-                leader_elector,
-                mempool_driver,
-                synchronizer,
+                leader,
                 rx_message,
                 rx_loopback,
                 tx_proposer,
@@ -77,18 +71,17 @@ impl Core {
                 last_voted_round: 0,
                 last_committed_round: 0,
                 high_qc: QC::genesis(),
-                timer: Timer::new(timeout_delay),
                 aggregator: Aggregator::new(committee),
-                network: SimpleSender::new(),
+                network_publisher: tx_publisher,
             }
             .run()
             .await
         });
     }
 
-    async fn store_block(&mut self, block: &Block) {
-        let key = block.digest().to_vec();
-        let value = bincode::serialize(block).expect("Failed to serialize block");
+    async fn commit_block(&mut self, block: &Block) {
+        let key = b"cblock".to_vec();
+        let value = block.encode();
         self.store.write(key, value).await;
     }
 
@@ -99,12 +92,8 @@ impl Core {
     async fn make_vote(&mut self, block: &Block) -> Option<Vote> {
         // Check if we can vote for this block.
         let safety_rule_1 = block.round > self.last_voted_round;
-        let mut safety_rule_2 = block.qc.round + 1 == block.round;
-        if let Some(ref tc) = block.tc {
-            let mut can_extend = tc.round + 1 == block.round;
-            can_extend &= block.qc.round >= *tc.high_qc_rounds().iter().max().expect("Empty TC");
-            safety_rule_2 |= can_extend;
-        }
+        let safety_rule_2 = block.qc.round + 1 == block.round;
+
         if !(safety_rule_1 && safety_rule_2) {
             return None;
         }
@@ -162,43 +151,6 @@ impl Core {
         }
     }
 
-    async fn local_timeout_round(&mut self) -> ConsensusResult<()> {
-        warn!("Timeout reached for round {}", self.round);
-
-        // Increase the last voted round.
-        self.increase_last_voted_round(self.round);
-
-        // Make a timeout message.
-        let timeout = Timeout::new(
-            self.high_qc.clone(),
-            self.round,
-            self.name,
-            self.signature_service.clone(),
-        )
-        .await;
-        debug!("Created {:?}", timeout);
-
-        // Reset the timer.
-        self.timer.reset();
-
-        // Broadcast the timeout message.
-        debug!("Broadcasting {:?}", timeout);
-        let addresses = self
-            .committee
-            .broadcast_addresses(&self.name)
-            .into_iter()
-            .map(|(_, x)| x)
-            .collect();
-        let message = bincode::serialize(&ConsensusMessage::Timeout(timeout.clone()))
-            .expect("Failed to serialize timeout message");
-        self.network
-            .broadcast(addresses, Bytes::from(message))
-            .await;
-
-        // Process our message.
-        self.handle_timeout(&timeout).await
-    }
-
     #[async_recursion]
     async fn handle_vote(&mut self, vote: &Vote) -> ConsensusResult<()> {
         debug!("Processing {:?}", vote);
@@ -224,54 +176,12 @@ impl Core {
         Ok(())
     }
 
-    async fn handle_timeout(&mut self, timeout: &Timeout) -> ConsensusResult<()> {
-        debug!("Processing {:?}", timeout);
-        if timeout.round < self.round {
-            return Ok(());
-        }
-
-        // Ensure the timeout is well formed.
-        timeout.verify(&self.committee)?;
-
-        // Process the QC embedded in the timeout.
-        self.process_qc(&timeout.high_qc).await;
-
-        // Add the new vote to our aggregator and see if we have a quorum.
-        if let Some(tc) = self.aggregator.add_timeout(timeout.clone())? {
-            debug!("Assembled {:?}", tc);
-
-            // Try to advance the round.
-            self.advance_round(tc.round).await;
-
-            // Broadcast the TC.
-            debug!("Broadcasting {:?}", tc);
-            let addresses = self
-                .committee
-                .broadcast_addresses(&self.name)
-                .into_iter()
-                .map(|(_, x)| x)
-                .collect();
-            let message = bincode::serialize(&ConsensusMessage::TC(tc.clone()))
-                .expect("Failed to serialize timeout certificate");
-            self.network
-                .broadcast(addresses, Bytes::from(message))
-                .await;
-
-            // Make a new block if we are the next leader.
-            if self.name == self.leader_elector.get_leader(self.round) {
-                self.generate_proposal(Some(tc)).await;
-            }
-        }
-        Ok(())
-    }
-
     #[async_recursion]
     async fn advance_round(&mut self, round: Round) {
         if round < self.round {
             return;
         }
-        // Reset the timer and advance round.
-        self.timer.reset();
+        // Advance round.
         self.round = round + 1;
         debug!("Moved to round {}", self.round);
 
@@ -280,9 +190,9 @@ impl Core {
     }
 
     #[async_recursion]
-    async fn generate_proposal(&mut self, tc: Option<TC>) {
+    async fn generate_proposal(&mut self) {
         self.tx_proposer
-            .send(ProposerMessage::Make(self.round, self.high_qc.clone(), tc))
+            .send(ProposerMessage::Make(self.round, self.high_qc.clone()))
             .await
             .expect("Failed to send message to proposer");
     }
@@ -411,9 +321,7 @@ impl Core {
 
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
-        // Also, schedule a timer in case we don't hear from the leader.
-        self.timer.reset();
-        if self.name == self.leader_elector.get_leader(self.round) {
+        if self.name == self.leader {
             self.generate_proposal(None).await;
         }
 

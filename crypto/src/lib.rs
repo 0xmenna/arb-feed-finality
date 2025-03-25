@@ -1,3 +1,5 @@
+use codec::Decode;
+use codec::Encode;
 // Copyright(C) Facebook, Inc. and its affiliates.
 use ed25519_dalek as dalek;
 use ed25519_dalek::ed25519;
@@ -19,7 +21,7 @@ pub mod keccak;
 pub type CryptoError = ed25519::Error;
 
 /// Represents a hash digest (32 bytes).
-#[derive(Hash, PartialEq, Default, Eq, Clone, Deserialize, Serialize, Ord, PartialOrd)]
+#[derive(Hash, PartialEq, Default, Eq, Clone, Encode, Decode, Ord, PartialOrd)]
 pub struct Digest(pub [u8; 32]);
 
 impl Digest {
@@ -63,7 +65,7 @@ pub trait Hash {
 }
 
 /// Represents a public key (in bytes).
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
+#[derive(Encode, Decode, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
 pub struct PublicKey(pub [u8; 32]);
 
 impl PublicKey {
@@ -176,7 +178,7 @@ where
 }
 
 /// Represents an ed25519 signature.
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[derive(Encode, Decode, Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Signature {
     part1: [u8; 32],
     part2: [u8; 32],

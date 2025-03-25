@@ -12,3 +12,6 @@ serde = { version = "1.0", features = ["derive"] }
 rand = "0.7.3"
 base64 = "0.13.0"
 tiny-keccak = { version = "2.0.2", features = ["keccak"]}
+codec = { package = "parity-scale-codec", version = "3.6.9", default-features = false, features = [
+	"derive",
+] }
