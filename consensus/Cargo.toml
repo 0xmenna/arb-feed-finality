@@ -21,7 +21,7 @@ async-trait = "0.1.50"
 store = { path = "../store" }
 crypto = { path = "../crypto" }
 transport = { path = "../transport" }
-mempool = { path = "../mempool" }
+feed = { path = "../feed" }
 
 [dev-dependencies]
 tokio-util = { version = "0.7.3", features= ["codec"] }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use codec::{Decode, Encode};
-use evm::{Address, H256, U256};
+use evm::{Address, BigInt, H256};
 use futures::{FutureExt, StreamExt};
 use log::{debug, warn};
 use serde::Deserialize;
@@ -62,49 +62,12 @@ pub struct L1IncomingMessageHeader {
     pub base_fee_l1: Option<BigInt>,
 }
 
-#[derive(Debug, Clone)]
-pub struct BigInt(U256);
-
-impl Encode for BigInt {
-    fn encode(&self) -> Vec<u8> {
-        self.0 .0.encode()
-    }
-}
-
-impl Decode for BigInt {
-    fn decode<I: codec::Input>(input: &mut I) -> std::result::Result<Self, codec::Error> {
-        Ok(Self(U256::from(Decode::decode(input)?)))
-    }
-}
-
-impl<'de> Deserialize<'de> for BigInt {
-    fn deserialize<D>(deserializer: D) -> Result<BigInt, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let n = evm::deserialize_number(deserializer)?;
-        Ok(BigInt::from(n))
-    }
-}
-
-impl AsRef<U256> for BigInt {
-    fn as_ref(&self) -> &U256 {
-        &self.0
-    }
-}
-
-impl From<U256> for BigInt {
-    fn from(val: U256) -> Self {
-        Self(val)
-    }
-}
-
 type L2Message = Base64Bytes;
 
 type Signature = Base64Bytes;
 
 #[derive(Encode, Decode, Debug, Clone)]
-struct Base64Bytes(Vec<u8>);
+pub struct Base64Bytes(Vec<u8>);
 
 impl Base64Bytes {
     pub fn size(&self) -> usize {

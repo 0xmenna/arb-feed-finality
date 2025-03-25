@@ -1,6 +1,5 @@
 use crate::source::BroadcastFeedMessage;
 use crate::source::BroadcastMessage;
-use bincode::de;
 use codec::{Decode, Encode};
 use log::debug;
 use store::Store;
@@ -15,15 +14,15 @@ pub const BATCH_POSTER_META_KEY: &[u8] = b"bp_meta";
 pub struct BatchPosterMetadata {
     /// The batch poster postion
     pub position: BatchPosterPosition,
-    /// The sequence number of the last message within the sealed batch
-    pub last_msg_seq_number: u64,
+    /// The sequence number of the last committed message within the sealed batch
+    pub last_committed_msg_seq_number: u64,
 }
 
 impl BatchPosterMetadata {
     pub fn new(position: BatchPosterPosition, last_msg_seq_number: u64) -> Self {
         Self {
             position,
-            last_msg_seq_number,
+            last_committed_msg_seq_number: last_msg_seq_number,
         }
     }
 }
@@ -58,7 +57,7 @@ impl Default for BatchPosterPosition {
     }
 }
 
-/// Stores feeds .
+/// Process incoming feeds.
 pub struct Processor;
 
 impl Processor {
@@ -73,7 +72,20 @@ impl Processor {
         tx_batchposter_pos: oneshot::Sender<BatchPosterPosition>,
     ) {
         tokio::spawn(async move {
-            // The sequence number of the last message of the last sealed batch
+            // TODO: The design implementation should be:
+            // 1. Read the latest committed block on ethereum and the associated batch poster position from the store.
+            // 2. Read the same data from ethereum, in case the store is far behind and confront the two.
+            // 3. Extract from the block of the latest committed batch the last committed sequence number message.
+            // 4. Extract the message sequence number of the incoming feed (to know the range of missing messages - from the (last committed message + 1) to the incoming feed).
+            // 5. Sync using a syncronizer (that leverages the DHT) the missing mesages within the extracted range.
+            // 6. Send the messages from the (last committed message + 1) onwards to the batch maker.
+            // (The assumption is that the batch poster position read is actually the previous of the ongoing one, but in rare cases it could be an older one, so you must manage a scenario in which this happens: todo)
+
+            // Current implementation is simpler:
+            // Just read the last batch poster position from the store and the last committed message sequence number.
+            // The bigger assumption here is that the node is in sync
+
+            // The sequence number of the last committed message of the last sealed batch
             let batchposter_meta = store
                 .read(BATCH_POSTER_META_KEY.to_vec())
                 .await
@@ -90,29 +102,14 @@ impl Processor {
 
             while let Some(feed) = rx_feed.recv().await {
                 for msg in feed.messages {
-                    if msg.sequence_number <= batchposter_meta.last_msg_seq_number {
+                    if msg.sequence_number <= batchposter_meta.last_committed_msg_seq_number {
                         debug!(
                             "Skipping message with sequence number: {}",
                             msg.sequence_number
                         );
                         continue;
                     }
-                    // Check wheter the message is already in the store.
-                    // If no message is found, write the message to the store.
-                    // If a message is found, use the found message rather than the proposed message.
-                    let msg_key = build_feed_key(msg.sequence_number);
-                    let maybe_msg = store
-                        .read(msg_key)
-                        .await
-                        .expect("Failed to read from store");
-                    let msg = if let None = maybe_msg {
-                        store.write(msg_key, msg.encode()).await;
-
-                        msg.encode()
-                    } else {
-                        maybe_msg.unwrap()
-                    };
-
+                    // Send the feed message
                     tx_msg.send(msg).await.expect("Failed to send feed message");
                 }
             }

@@ -1,17 +1,16 @@
+use std::io::Write;
+
 use crate::{
-    feed_processor::{BatchPosterMetadata, BatchPosterPosition, BATCH_POSTER_META_KEY},
+    processor::{BatchPosterMetadata, BatchPosterPosition, BATCH_POSTER_META_KEY},
     source::{BroadcastFeedMessage, MessageWithMetadata},
 };
 use brotli::CompressorWriter;
-use codec::{Decode, Encode};
+use codec::Encode;
 use crypto::{keccak, Digest};
-use evm::{abi, Address, U256};
+use evm::{abi, Address, BigInt};
 use log::{debug, warn};
 use store::Store;
-use tokio::sync::{
-    mpsc::{Receiver, Sender},
-    oneshot,
-};
+use tokio::sync::mpsc::{Receiver, Sender};
 
 const BATCH_SEGMENT_KIND_L2_MESSAGE: u8 = 0;
 const BATCH_SEGMENT_KIND_DELAYED_MESSAGES: u8 = 2;
@@ -23,55 +22,7 @@ const MAX_SEGMENTS_PER_SEQUENCER_MESSAGE: usize = 100 * 1024;
 
 const BROTLI_MESSAGE_HEADER_BYTE: u8 = 0;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Copy)]
-pub struct Round(pub U256);
-
-impl std::ops::Add for Round {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self(self.0 + other.0)
-    }
-}
-
-impl std::ops::Sub for Round {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        Self(self.0 - other.0)
-    }
-}
-
-impl Round {
-    pub fn saturating_sub(&self, other: Self) -> Self {
-        Self(self.0.saturating_sub(other.0))
-    }
-
-    pub fn saturating_add(&self, other: Self) -> Self {
-        Self(self.0.saturating_add(other.0))
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.0.is_zero()
-    }
-
-    pub fn zero() -> Self {
-        Self(U256::zero())
-    }
-}
-
-impl Encode for Round {
-    fn encode(&self) -> Vec<u8> {
-        self.0 .0.encode()
-    }
-}
-
-impl Decode for Round {
-    fn decode<I: codec::Input>(input: &mut I) -> Result<Self, codec::Error> {
-        let vec = Vec::<u8>::decode(input)?;
-        Ok(Self(U256::from(vec)))
-    }
-}
+type Round = BigInt;
 
 /// Whether to close the batch or not and the digest of the resulting batch
 pub enum BatchMakerResult {
@@ -90,7 +41,6 @@ pub struct MiniBatchFeed {
 
 pub type BuildingBatchDigest = Digest;
 
-#[derive(Debug)]
 struct OngoingBatch {
     /// The opening round of the ongoing building batch
     opening_round: Round,
@@ -134,17 +84,15 @@ impl OngoingBatch {
     }
 
     pub fn build_batchposter_digest(
-        &mut self,
+        mut self,
         position: &BatchPosterPosition,
-    ) -> Result<Digest, anyhow::Error> {
+    ) -> Result<(Self, Digest), anyhow::Error> {
         // Build the batch digest
         let after_delayed_msg = self.batch.segments.delayed_msg();
-        let msg = self
-            .batch
-            .segments
-            .clone()
-            .close_and_get_bytes()?
-            .unwrap_or(Default::default());
+        let (cloned_segments, msg) = self.batch.segments.close()?;
+        self.batch.segments = cloned_segments;
+
+        let msg = msg.unwrap_or_default();
 
         let batchposter_msg = BatchPosterMsg {
             sequence_number: position.next_seq_number,
@@ -157,9 +105,9 @@ impl OngoingBatch {
 
         let batchposter_digest = keccak::hash(batchposter_msg.encode());
 
-        self.batchposter_msg = Some((batchposter_digest, batchposter_msg));
+        self.batchposter_msg = Some((batchposter_digest.clone(), batchposter_msg));
 
-        Ok(batchposter_digest)
+        Ok((self, batchposter_digest))
     }
 
     pub fn is_opened(&self) -> bool {
@@ -236,7 +184,7 @@ impl BatchMaker {
                 // Process incoming mini batches.
                 Some(mini_batch) = self.rx_mini_batch.recv() => {
                     // Compute the total size of the mini batch.
-                    let mini_batch_size: usize = mini_batch.messages.iter()
+                    let mini_batch_size = mini_batch.messages.iter()
                         .map(|msg| msg.message.message.l2_msg.size())
                         .sum();
 
@@ -245,7 +193,7 @@ impl BatchMaker {
                         warn!("Mini batch cannot be handled because it exceeds the batch maximum size");
                         self.tx_result.send(
                             BatchMakerResult::Error(anyhow::anyhow!("Mini batch exceeds maximum size"))
-                        ).await;
+                        ).await.expect("Failed to send error result");
                         continue;
                     }
 
@@ -282,7 +230,7 @@ impl BatchMaker {
 
                         let metadata = BatchPosterMetadata {
                             position: self.batchposter_pos.clone(),
-                            last_msg_seq_number: latest_seq_num,
+                            last_committed_msg_seq_number: latest_seq_num,
                         };
 
                         committed_batch = Some(SealBatch::new(digest, batchposter_data, metadata));
@@ -305,9 +253,10 @@ impl BatchMaker {
                     }
 
                     // Build the batchposter digest from the ongoing batch.
-                    let digest = ongoing_batch
+                    let (batch, digest) = ongoing_batch
                         .build_batchposter_digest(&self.batchposter_pos)
                         .expect("Failed to close batch segments");
+                    ongoing_batch = batch;
 
                     // Send either a new or ongoing batch result based on whether the batch was sealed.
                     let result = if seal_batch {
@@ -315,7 +264,7 @@ impl BatchMaker {
                     } else {
                         BatchMakerResult::Ongoing(digest)
                     };
-                    self.tx_result.send(result).await;
+                    self.tx_result.send(result).await.expect("Failed to send batch result");
                 },
                 // Process commit commands.
                 Some(commit_digest) = self.rx_commit_batch.recv() => {
@@ -326,6 +275,8 @@ impl BatchMaker {
                     self.store.write(BATCH_POSTER_META_KEY.to_vec(), batch.metadata.encode()).await;
 
                     committed_batch = None;
+
+                    // TODO: Delete old committed batches
                 }
             }
         }
@@ -384,7 +335,6 @@ const COMPRESSION_LEVEL: u32 = 11;
 const LGWIN: u32 = 22;
 pub const MAX_SIZE: usize = 90000;
 
-#[derive(Debug, Clone)]
 pub struct BatchSegments {
     compressed_writer: CompressorWriter<Vec<u8>>,
     raw_segments: Vec<Vec<u8>>,
@@ -395,7 +345,6 @@ pub struct BatchSegments {
     total_uncompressed_size: usize,
     last_compressed_size: usize,
     trailing_headers: usize,
-    is_done: bool,
 }
 
 impl BatchSegments {
@@ -413,36 +362,11 @@ impl BatchSegments {
             total_uncompressed_size: 0,
             last_compressed_size: 0,
             trailing_headers: 0,
-            is_done: false,
         }
     }
 }
 
 impl BatchSegments {
-    fn recompress_all(&mut self) -> anyhow::Result<()> {
-        self.compressed_writer =
-            CompressorWriter::new(Vec::new(), MAX_SIZE * 2, COMPRESSION_LEVEL, LGWIN);
-        self.new_uncompressed_size = 0;
-        self.total_uncompressed_size = 0;
-
-        for segment in self.raw_segments.clone() {
-            self.add_segment_to_compressed(segment)?;
-        }
-
-        if self.total_uncompressed_size > MAX_DECOMPRESSED_LEN {
-            return Err(anyhow::anyhow!(
-                "Batch size exceeds maximum decompressed length"
-            ));
-        }
-        if self.raw_segments.len() >= MAX_SEGMENTS_PER_SEQUENCER_MESSAGE {
-            return Err(anyhow::anyhow!(
-                "Number of raw segments exceeds maximum allowed"
-            ));
-        }
-
-        Ok(())
-    }
-
     fn test_for_overflow(&mut self, is_header: bool) -> anyhow::Result<bool> {
         if self.total_uncompressed_size > MAX_DECOMPRESSED_LEN {
             return Ok(true);
@@ -470,18 +394,6 @@ impl BatchSegments {
         Ok(false)
     }
 
-    fn close(&mut self) -> anyhow::Result<()> {
-        // Remove trailing headers
-        let len = self.raw_segments.len();
-        self.raw_segments
-            .truncate(len.saturating_sub(self.trailing_headers));
-        self.trailing_headers = 0;
-        self.recompress_all()?;
-        self.is_done = true;
-
-        Ok(())
-    }
-
     fn add_segment_to_compressed(&mut self, segment: Vec<u8>) -> anyhow::Result<()> {
         let encoded = evm::rlp::encode(&segment);
         let len_written = self.compressed_writer.write(&encoded)?;
@@ -492,10 +404,6 @@ impl BatchSegments {
     }
 
     pub fn add_segment(&mut self, segment: Vec<u8>, is_header: bool) -> anyhow::Result<()> {
-        if self.is_done {
-            return Err(anyhow::anyhow!("Batch segments already closed"));
-        }
-
         self.add_segment_to_compressed(segment.clone())?;
 
         let overflow = self.test_for_overflow(is_header)?;
@@ -548,10 +456,6 @@ impl BatchSegments {
     }
 
     pub fn add_message(&mut self, msg: &MessageWithMetadata) -> anyhow::Result<()> {
-        if self.is_done {
-            return Err(anyhow::anyhow!("Batch segments already closed",));
-        }
-
         if msg.delayed_messages_read > self.delayed_msg {
             if msg.delayed_messages_read != self.delayed_msg + 1 {
                 return Err(anyhow::anyhow!(
@@ -592,19 +496,53 @@ impl BatchSegments {
         self.delayed_msg
     }
 
-    pub fn close_and_get_bytes(mut self) -> anyhow::Result<Option<Vec<u8>>> {
-        if !self.is_done {
-            self.close()?;
+    pub fn close(mut self) -> anyhow::Result<(Self, Option<Vec<u8>>)> {
+        let cloned = Self {
+            compressed_writer: self.compressed_writer,
+            raw_segments: self.raw_segments.clone(),
+            delayed_msg: self.delayed_msg,
+            timestamp: self.timestamp,
+            block_num: self.block_num,
+            new_uncompressed_size: self.new_uncompressed_size,
+            total_uncompressed_size: self.total_uncompressed_size,
+            last_compressed_size: self.last_compressed_size,
+            trailing_headers: self.trailing_headers,
+        };
+
+        // Remove trailing headers
+        let len = self.raw_segments.len();
+        self.raw_segments
+            .truncate(len.saturating_sub(self.trailing_headers));
+        self.trailing_headers = 0;
+
+        self.compressed_writer =
+            CompressorWriter::new(Vec::new(), MAX_SIZE * 2, COMPRESSION_LEVEL, LGWIN);
+        self.new_uncompressed_size = 0;
+        self.total_uncompressed_size = 0;
+
+        for segment in self.raw_segments.clone() {
+            self.add_segment_to_compressed(segment)?;
+        }
+
+        if self.total_uncompressed_size > MAX_DECOMPRESSED_LEN {
+            return Err(anyhow::anyhow!(
+                "Batch size exceeds maximum decompressed length"
+            ));
+        }
+        if self.raw_segments.len() >= MAX_SEGMENTS_PER_SEQUENCER_MESSAGE {
+            return Err(anyhow::anyhow!(
+                "Number of raw segments exceeds maximum allowed"
+            ));
         }
 
         if self.raw_segments.is_empty() {
-            return Ok(None);
+            return Ok((cloned, None));
         }
 
         self.compressed_writer.flush()?;
         let compressed_bytes = self.compressed_writer.into_inner();
         let mut full_msg: Vec<u8> = vec![BROTLI_MESSAGE_HEADER_BYTE];
         full_msg.extend_from_slice(&compressed_bytes);
-        Ok(Some(full_msg))
+        Ok((cloned, Some(full_msg)))
     }
 }
