@@ -9,7 +9,6 @@ use consensus::Committee as ConsensusCommittee;
 use env_logger::Env;
 use futures::future::join_all;
 use log::error;
-use mempool::Committee as MempoolCommittee;
 use std::fs;
 use tokio::task::JoinHandle;
 
@@ -103,37 +102,30 @@ async fn main() {
 fn deploy_testbed(nodes: u16) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error::Error>> {
     let keys: Vec<_> = (0..nodes).map(|_| Secret::new()).collect();
 
+    if keys.is_empty() {
+        return Err("No keys generated".into());
+    }
+
+    // Simply use the first key as the leader.
+    let leader = keys[0].name;
     // Print the committee file.
     let epoch = 1;
-    let mempool_committee = MempoolCommittee::new(
-        keys.iter()
-            .enumerate()
-            .map(|(i, key)| {
-                let name = key.name;
-                let stake = 1;
-                let front = format!("127.0.0.1:{}", 25_000 + i).parse().unwrap();
-                let mempool = format!("127.0.0.1:{}", 25_100 + i).parse().unwrap();
-                (name, stake, front, mempool)
-            })
-            .collect(),
-        epoch,
-    );
+
     let consensus_committee = ConsensusCommittee::new(
         keys.iter()
             .enumerate()
             .map(|(i, key)| {
                 let name = key.name;
                 let stake = 1;
-                let addresses = format!("127.0.0.1:{}", 25_200 + i).parse().unwrap();
-                (name, stake, addresses)
+                (name, stake)
             })
             .collect(),
+        leader,
         epoch,
     );
     let committee_file = "committee.json";
     let _ = fs::remove_file(committee_file);
     Committee {
-        mempool: mempool_committee,
         consensus: consensus_committee,
     }
     .write(committee_file)?;

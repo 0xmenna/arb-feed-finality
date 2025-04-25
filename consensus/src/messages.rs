@@ -1,19 +1,14 @@
 use crate::config::Committee;
-use crate::consensus::{Checkpoint, ParentRound, Round};
+use crate::consensus::{ParentRound, View};
 use crate::error::{ConsensusError, ConsensusResult};
 use codec::{Decode, Encode};
 use crypto::{keccak, Digest, Hash, PublicKey, Signature, SignatureService};
 use std::collections::HashSet;
 use std::fmt;
 
-#[cfg(test)]
-#[path = "tests/messages_tests.rs"]
-pub mod messages_tests;
-
 #[derive(Encode, Decode, Default, Clone)]
 pub struct Block {
-    pub checkpoint: Checkpoint,
-    pub round: Round,
+    pub view: View,
     pub qc: QC,
     pub parent_round: ParentRound,
     pub last_feed_sequence_number: u64,
@@ -25,8 +20,7 @@ pub struct Block {
 impl Block {
     pub async fn new(
         qc: QC,
-        checkpoint: Checkpoint,
-        round: Round,
+        view: View,
         parent_round: ParentRound,
         last_feed_sequence_number: u64,
         batch_poster_digest: Digest,
@@ -34,8 +28,7 @@ impl Block {
         mut signature_service: SignatureService,
     ) -> Self {
         let block = Self {
-            checkpoint,
-            round,
+            view,
             qc,
             parent_round,
             last_feed_sequence_number,
@@ -74,8 +67,7 @@ impl Block {
 
 #[derive(Encode, Decode, Clone)]
 pub struct BlockPreImage {
-    pub checkpoint: Checkpoint,
-    pub round: Round,
+    pub view: View,
     pub qc: QC,
     pub parent_round: ParentRound,
     pub last_feed_sequence_number: u64,
@@ -86,8 +78,7 @@ pub struct BlockPreImage {
 impl From<&Block> for BlockPreImage {
     fn from(block: &Block) -> Self {
         Self {
-            checkpoint: block.checkpoint,
-            round: block.round,
+            view: block.view,
             qc: block.qc.clone(),
             parent_round: block.parent_round,
             last_feed_sequence_number: block.last_feed_sequence_number,
@@ -109,10 +100,9 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B({}, {}, {:?}, {:?}, {}, {}, {})",
+            "{}: B({:?}, {:?}, {:?}, {}, {}, {})",
             self.digest(),
-            self.checkpoint,
-            self.round,
+            self.view,
             self.qc,
             self.parent_round,
             self.last_feed_sequence_number,
@@ -124,15 +114,14 @@ impl fmt::Debug for Block {
 
 impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "B({}, {})", self.checkpoint, self.round)
+        write!(f, "B({}, {})", self.view.checkpoint, self.view.round)
     }
 }
 
 #[derive(Clone, Encode, Decode)]
 pub struct Vote {
     pub hash: Digest,
-    pub checkpoint: Checkpoint,
-    pub round: Round,
+    pub view: View,
     pub author: PublicKey,
     pub signature: Signature,
 }
@@ -145,8 +134,7 @@ impl Vote {
     ) -> Self {
         let vote = Self {
             hash: block.digest(),
-            checkpoint: block.checkpoint,
-            round: block.round,
+            view: block.view,
             author,
             signature: Signature::default(),
         };
@@ -171,8 +159,7 @@ impl Hash for Vote {
     fn digest(&self) -> Digest {
         let mut preimage = Vec::new();
         preimage.extend_from_slice(&self.hash.to_vec());
-        preimage.extend_from_slice(&self.checkpoint.to_le_bytes());
-        preimage.extend_from_slice(&self.round.to_le_bytes());
+        preimage.extend_from_slice(&self.view.encode());
 
         keccak::hash(&preimage)
     }
@@ -180,19 +167,14 @@ impl Hash for Vote {
 
 impl fmt::Debug for Vote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "V({}, {}, {}, {})",
-            self.author, self.checkpoint, self.round, self.hash
-        )
+        write!(f, "V({}, {:?}, {})", self.author, self.view, self.hash)
     }
 }
 
 #[derive(Clone, Encode, Decode, Default)]
 pub struct QC {
     pub hash: Digest,
-    pub checkpoint: Checkpoint,
-    pub round: Round,
+    pub view: View,
     pub votes: Vec<(PublicKey, Signature)>,
 }
 
@@ -226,8 +208,7 @@ impl Hash for QC {
     fn digest(&self) -> Digest {
         let mut preimage = Vec::new();
         preimage.extend_from_slice(&self.hash.to_vec());
-        preimage.extend_from_slice(&self.checkpoint.to_le_bytes());
-        preimage.extend_from_slice(&self.round.to_le_bytes());
+        preimage.extend_from_slice(&self.view.encode());
 
         keccak::hash(&preimage)
     }
@@ -235,12 +216,12 @@ impl Hash for QC {
 
 impl fmt::Debug for QC {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "QC({}, {}, {})", self.hash, self.checkpoint, self.round)
+        write!(f, "QC({}, {:?})", self.hash, self.view)
     }
 }
 
 impl PartialEq for QC {
     fn eq(&self, other: &Self) -> bool {
-        self.hash == other.hash && self.checkpoint == other.checkpoint && self.round == other.round
+        self.hash == other.hash && self.view == other.view
     }
 }

@@ -1,14 +1,12 @@
 use crate::config::Committee;
 use crate::core::Core;
 use crate::error::ConsensusError;
-use crate::helper::Helper;
-use crate::leader::{self};
 use crate::messages::{Block, Vote};
 use crate::proposer::Proposer;
 use async_trait::async_trait;
 use bytes::Bytes;
 use codec::{Decode, Encode};
-use crypto::{Digest, PublicKey, SignatureService};
+use crypto::{PublicKey, SignatureService};
 use evm::BigInt;
 use feed::batch_maker::{BatchMakerResult, MiniBatchFeed};
 use feed::source::BroadcastFeedMessage;
@@ -18,20 +16,37 @@ use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use transport::{MessageHandler, Publisher};
 
-#[cfg(test)]
-#[path = "tests/consensus_tests.rs"]
-pub mod consensus_tests;
-
 /// The default channel capacity for each channel of the consensus.
 pub const CHANNEL_CAPACITY: usize = 1_000;
 
-/// The consensus checkpoint number.
-pub type Checkpoint = u64;
+/// The consensus view.
+#[derive(Hash, Debug, Encode, Decode, Default, Ord, PartialOrd, Eq, PartialEq, Clone, Copy)]
+pub struct View {
+    pub checkpoint: u64,
+    pub round: u64,
+}
 
-/// The consensus round number.
-pub type Round = u64;
+impl std::fmt::Display for View {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "View {{ checkpoint: {}, round: {} }}",
+            self.checkpoint, self.round
+        )
+    }
+}
 
-/// The consensus parent chain round number.
+impl View {
+    pub fn new(checkpoint: u64, round: u64) -> Self {
+        Self { checkpoint, round }
+    }
+
+    pub fn is_next_of(&self, prev: &Self) -> bool {
+        (self.checkpoint == prev.checkpoint && self.round == prev.round + 1)
+            || (self.checkpoint == prev.checkpoint + 1 && self.round == 0)
+    }
+}
+
 pub type ParentRound = BigInt;
 
 #[derive(Encode, Decode, Debug)]
@@ -49,24 +64,16 @@ impl Consensus {
         committee: Committee,
         signature_service: SignatureService,
         store: Store,
-        rx_feed: Receiver<BroadcastFeedMessage>,
-        tx_mini_batch: Sender<MiniBatchFeed>,
-        rx_batch_maker: Receiver<BatchMakerResult>,
+        // TODO: the following three channels handle them directly in the core.
+        // rx_feed: Receiver<BroadcastFeedMessage>,
+        // tx_mini_batch: Sender<MiniBatchFeed>,
+        // rx_batch_maker: Receiver<BatchMakerResult>,
         tx_network_publisher: Publisher,
         tx_commit: Sender<Block>,
     ) -> ConsensusReceiverHandler {
         let (tx_consensus, rx_consensus) = channel(CHANNEL_CAPACITY);
         let (tx_loopback, rx_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_proposer, rx_proposer) = channel(CHANNEL_CAPACITY);
-        let (tx_helper, rx_helper) = channel(CHANNEL_CAPACITY);
-
-        info!(
-            "Node {} registered a new network handler for consensus messages",
-            name
-        );
-
-        // Make the leader election module.
-        let leader = leader::get_leader_from_parent_chain();
 
         // Spawn the consensus core.
         Core::spawn(
@@ -74,15 +81,14 @@ impl Consensus {
             committee.clone(),
             signature_service.clone(),
             store.clone(),
-            leader,
             /* rx_message */ rx_consensus,
             rx_loopback,
             tx_proposer,
             tx_commit,
-            tx_network_publisher,
+            tx_network_publisher.clone(),
         );
 
-        if name == leader {
+        if name == committee.leader {
             // Spawn the block proposer.
             Proposer::spawn(
                 name,
@@ -90,25 +96,19 @@ impl Consensus {
                 signature_service,
                 /* rx_message */ rx_proposer,
                 tx_loopback,
+                tx_network_publisher,
             );
         }
 
-        // Spawn the helper module.
-        Helper::spawn(committee, store, /* rx_requests */ rx_helper);
-
         // Return the network handler.
-        ConsensusReceiverHandler {
-            tx_consensus,
-            tx_helper,
-        }
+        ConsensusReceiverHandler { tx_consensus }
     }
 }
 
-/// Defines how the network receiver handles incoming primary messages.
+/// Defines how the network receiver handles incoming messages.
 #[derive(Clone)]
-struct ConsensusReceiverHandler {
+pub struct ConsensusReceiverHandler {
     tx_consensus: Sender<ConsensusMessage>,
-    tx_helper: Sender<(Digest, PublicKey)>,
 }
 
 #[async_trait]

@@ -6,7 +6,7 @@ use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 
-const FEED_KEY_PREFIX: &[u8] = b"feed";
+pub const FEED_KEY_PREFIX: &[u8] = b"feed_";
 
 pub const BATCH_POSTER_META_KEY: &[u8] = b"bp_meta";
 

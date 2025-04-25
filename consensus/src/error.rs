@@ -1,7 +1,8 @@
-use crate::consensus::Round;
 use crypto::{CryptoError, Digest, PublicKey};
 use store::StoreError;
 use thiserror::Error;
+
+use crate::consensus::View;
 
 #[macro_export]
 macro_rules! bail {
@@ -53,11 +54,11 @@ pub enum ConsensusError {
     #[error("Malformed block {0}")]
     MalformedBlock(Digest),
 
-    #[error("Received block {digest} from leader {leader} at round {round}")]
+    #[error("Received block {digest} from leader {leader} at view {view}")]
     WrongLeader {
         digest: Digest,
         leader: PublicKey,
-        round: Round,
+        view: View,
     },
 
     #[error("Invalid payload")]
