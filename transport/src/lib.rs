@@ -20,7 +20,7 @@ use libp2p::{
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{
-    mpsc::{channel, Receiver, Sender},
+    mpsc::{Receiver, Sender},
     oneshot,
 };
 
@@ -81,11 +81,20 @@ macro_rules! get_agent_info {
 
 #[async_trait]
 pub trait MessageHandler: Clone + Send + Sync + 'static {
-    /// Defines how to handle an incoming message. A typical usage is to define a `MessageHandler` with a
-    /// number of `Sender<T>` channels. Then implement `dispatch` to deserialize incoming messages and
-    /// forward them through the appropriate delivery channel. Then `writer` can be used to send back
-    /// responses or acknowledgements to the sender machine (see unit tests for examples).
+    /// Defines how to handle an incoming message.
     async fn dispatch(&self, message: Bytes) -> Result<(), Box<dyn core::error::Error>>;
+}
+
+#[async_trait]
+pub trait TopicHandler: Clone + Send + Sync + 'static {
+    /// Defines how to handle an incoming message from a topic.
+    async fn dispatch(
+        &self,
+        topic: &str,
+        message: Bytes,
+    ) -> Result<(), Box<dyn core::error::Error>>;
+
+    fn topics(&self) -> Vec<&'static str>;
 }
 
 /// The p2p swarm
@@ -94,75 +103,57 @@ pub type NodeSwarm = Swarm<Wrapped<BaseBehaviour>>;
 /// It publishes messages to a specific topic
 pub type Publisher = Sender<(&'static str, Bytes)>;
 
-/// It registers a new handler for incoming messages from a subscribed topic
-pub type RegisterHandler<Handler> = Sender<(&'static str, Handler)>;
-
 /// Convenient alias for cancel handlers returned to the caller task.
 pub type CancelHandler = oneshot::Receiver<Bytes>;
 
-pub struct P2PTransport<Handler: MessageHandler> {
+pub struct P2PTransport<Handler: TopicHandler> {
     /// The swarm on top of which the node operates
     swarm: NodeSwarm,
-    /// Received handlers from other tasks
-    rx_handlers: Receiver<(&'static str, Handler)>,
+    /// Reading dispatcher for incoming topic messages
+    handler: Handler,
     /// Recieved messages for publishing them to a topic
-    rx_publishers: Receiver<(&'static str, Bytes)>,
-    /// Message handlers for a task that subscribed to a topic
-    handlers: HashMap<String, Handler>,
+    rx_publisher: Receiver<(&'static str, Bytes)>,
     /// Known topics
     topics: HashMap<String, ()>,
 }
 
-impl<Handler: MessageHandler> P2PTransport<Handler> {
-    pub async fn spawn(args: TransportArgs) -> (Publisher, RegisterHandler<Handler>) {
+impl<Handler: TopicHandler> P2PTransport<Handler> {
+    pub fn spawn(
+        args: TransportArgs,
+        handler: Handler,
+        rx_publisher: Receiver<(&'static str, Bytes)>,
+    ) {
         let agent_info = get_agent_info!();
-        let builder = P2PTransportBuilder::from_cli(args, agent_info)
-            .await
-            .expect("Invalid transport arguments");
+        let builder =
+            P2PTransportBuilder::from_cli(args, agent_info).expect("Invalid transport arguments");
         // Create a default Swarm.
         let swarm = builder
             .build_default_swarm()
             .expect("Cannot build swarm for invalid arguments");
 
-        // Create channels for receiver handlers and publishers
-        let (tx_handlers, rx_handlers) = channel(100);
-        let (tx_publishers, rx_publishers) = channel(1_000);
-
         tokio::spawn(async move {
             Self {
                 swarm,
-                rx_handlers,
-                rx_publishers,
-                handlers: HashMap::new(),
+                handler,
+                rx_publisher,
                 topics: HashMap::new(),
             }
             .run()
             .await
         });
-
-        (tx_publishers, tx_handlers)
     }
 
     pub async fn run(&mut self) {
+        // Subscribe to all topics managed by the handler
+        for topic in self.handler.topics() {
+            self.swarm.behaviour_mut().subscribe(topic);
+            self.topics.insert(topic.to_string(), ());
+        }
+
         loop {
             tokio::select! {
-                // Handle incoming handler registration requests
-                Some((topic, handler)) = self.rx_handlers.recv() => {
-                    if self.topics.get(topic).is_none() {
-                        // Topic is not known so subscribe to topic, add to known topics and add handler
-                        self.swarm.behaviour_mut().subscribe(topic);
-                        self.topics.insert(topic.to_string(), ());
-                        self.handlers.insert(topic.to_string(), handler);
-                    } else if self.handlers.get(topic).is_none() {
-                        // Topic is known, just add the handler
-                        self.handlers.insert(topic.to_string(), handler);
-                    } else {
-                        debug!("Handler of topic {} is already registered", topic);
-                    }
-                },
-
                 // Publish message to given topic
-                Some((topic, data)) = self.rx_publishers.recv() => {
+                Some((topic, data)) = self.rx_publisher.recv() => {
                     if self.topics.get(topic).is_none() {
                         // Subscribe to topic and add to known topics
                         self.swarm.behaviour_mut().subscribe(topic);
@@ -177,13 +168,11 @@ impl<Handler: MessageHandler> P2PTransport<Handler> {
                         SwarmEvent::Behaviour(BaseBehaviourEvent::Gossipsub(msg)) => {
                             let topic = msg.topic;
 
-                            if let Some(handler) = self.handlers.get(topic) {
-                                if let Err(e) = handler.dispatch(msg.message.into()).await {
+                            // Dispatch message
+                            if let Err(e) = self.handler.dispatch(topic, msg.message.into()).await {
                                     warn!("{}", e);
                                 }
-                            }
                         },
-
                         other => {
                             debug!("Other swarm event: {:?}", other);
                         }

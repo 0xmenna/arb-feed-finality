@@ -7,14 +7,14 @@ use libp2p::{
 };
 
 /// Load key from file or generate and save to file.
-pub async fn get_keypair(path: Option<PathBuf>) -> anyhow::Result<Keypair> {
+pub fn get_keypair(path: Option<PathBuf>) -> anyhow::Result<Keypair> {
     let Some(path) = path else {
         return Ok(Keypair::generate_ed25519());
     };
-    match tokio::fs::metadata(&path).await {
+    match std::fs::metadata(&path) {
         Ok(meta) if meta.is_file() => {
             log::info!("Reading key from {}", path.display());
-            let mut content = tokio::fs::read(&path).await?;
+            let mut content = std::fs::read(&path)?;
             let keypair = ed25519::Keypair::try_from_bytes(content.as_mut_slice())?;
             Ok(keypair.into())
         }
@@ -24,7 +24,7 @@ pub async fn get_keypair(path: Option<PathBuf>) -> anyhow::Result<Keypair> {
         Err(_) => {
             log::info!("Generating new key and saving into {}", path.display());
             let keypair = ed25519::Keypair::generate();
-            tokio::fs::write(&path, keypair.to_bytes()).await?;
+            std::fs::write(&path, keypair.to_bytes())?;
             Ok(keypair.into())
         }
     }
