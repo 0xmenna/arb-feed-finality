@@ -85,7 +85,7 @@ async fn main() {
             committee,
             parameters,
             store,
-        } => match Node::new(transport, &committee, &keys, &store, parameters).await {
+        } => match Node::new(transport, &committee, &keys, &store, parameters) {
             Ok(mut node) => {
                 tokio::spawn(async move {
                     node.analyze_block().await;
@@ -105,58 +105,59 @@ async fn main() {
 }
 
 fn deploy_testbed(nodes: u16) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error::Error>> {
-    // let keys: Vec<_> = (0..nodes).map(|_| Secret::new()).collect();
+    let keys: Vec<_> = (0..nodes).map(|_| Secret::new()).collect();
 
-    // if keys.is_empty() {
-    //     return Err("No keys generated".into());
-    // }
+    if keys.is_empty() {
+        return Err("No keys generated".into());
+    }
 
-    // // Simply use the first key as the leader.
-    // let leader = keys[0].name;
-    // // Print the committee file.
-    // let epoch = 1;
+    // Simply use the first key as the leader.
+    let leader = keys[0].name;
+    let epoch = 1;
 
-    // let consensus_committee = ConsensusCommittee::new(
-    //     keys.iter()
-    //         .enumerate()
-    //         .map(|(i, key)| {
-    //             let name = key.name;
-    //             let stake = 1;
-    //             (name, stake)
-    //         })
-    //         .collect(),
-    //     leader,
-    //     epoch,
-    // );
-    // let committee_file = "committee.json";
-    // let _ = fs::remove_file(committee_file);
-    // Committee {
-    //     consensus: consensus_committee,
-    // }
-    // .write(committee_file)?;
+    let consensus_committee = ConsensusCommittee::new(
+        keys.iter()
+            .map(|key| {
+                let name = key.name;
+                let stake = 1;
+                (name, stake)
+            })
+            .collect(),
+        leader,
+        epoch,
+    );
+    let committee_file = "committee.json";
+    let _ = fs::remove_file(committee_file);
+    Committee {
+        consensus: consensus_committee,
+    }
+    .write(committee_file)?;
 
-    // // Write the key files and spawn all nodes.
-    // keys.iter()
-    //     .enumerate()
-    //     .map(|(i, keypair)| {
-    //         let key_file = format!("node_{}.json", i);
-    //         let _ = fs::remove_file(&key_file);
-    //         keypair.write(&key_file)?;
+    // Generate transport-level configuration.
+    let transports = TransportArgs::testing_args(nodes);
 
-    //         let store_path = format!("db_{}", i);
-    //         let _ = fs::remove_dir_all(&store_path);
+    // Write the key files and spawn all nodes.
+    keys.iter()
+        .enumerate()
+        .map(|(i, keypair)| {
+            let key_file = format!("node_{}.json", i);
+            let _ = fs::remove_file(&key_file);
+            keypair.write(&key_file)?;
 
-    //         Ok(tokio::spawn(async move {
-    //             match Node::new(committee_file, &key_file, &store_path, None).await {
-    //                 Ok(mut node) => {
-    //                     // Sink the commit channel.
-    //                     while node.commit.recv().await.is_some() {}
-    //                 }
-    //                 Err(e) => error!("{}", e),
-    //             }
-    //         }))
-    //     })
-    //     .collect::<Result<_, Box<dyn std::error::Error>>>()
+            let store_path = format!("db_{}", i);
+            let _ = fs::remove_dir_all(&store_path);
 
-    todo!()
+            let transport = transports[i].clone();
+
+            Ok(tokio::spawn(async move {
+                match Node::new(transport, committee_file, &key_file, &store_path, None) {
+                    Ok(mut node) => {
+                        // Sink the commit channel.
+                        while node.commit.recv().await.is_some() {}
+                    }
+                    Err(e) => error!("{}", e),
+                }
+            }))
+        })
+        .collect::<Result<_, Box<dyn std::error::Error>>>()
 }

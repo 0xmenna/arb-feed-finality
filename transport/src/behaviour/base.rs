@@ -162,7 +162,7 @@ impl BaseBehaviour {
             ),
             whitelist: WhitelistBehavior::new(
                 // change this accordingly when in production
-                ContractClient::default(),
+                ContractClient::testing_client(),
                 WhitelistConfig::new(config.onchain_update_interval),
             )
             .into(),

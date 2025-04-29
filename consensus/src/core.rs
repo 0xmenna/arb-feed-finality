@@ -7,7 +7,7 @@ use crate::proposer::MakeProposal;
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use codec::Encode;
-use crypto::Digest;
+use crypto::{Digest, Hash};
 use crypto::{PublicKey, SignatureService};
 use evm::BigInt;
 use log::{debug, error, info, warn};
@@ -28,6 +28,7 @@ pub struct Core {
     tx_commit: Sender<Block>,
     last_voted_view: View,
     last_committed_view: View,
+    committing_block: Block,
     last_msg_sequence_number: u64,
     high_qc: QC,
     aggregator: Aggregator,
@@ -60,6 +61,7 @@ impl Core {
                 last_voted_view: View::new(0, 0),
                 last_committed_view: View::new(0, 0),
                 last_msg_sequence_number: 0,
+                committing_block: Block::genesis(),
                 high_qc: QC::genesis(),
                 aggregator: Aggregator::new(committee),
                 network_publisher: tx_publisher,
@@ -103,16 +105,20 @@ impl Core {
         Some(Vote::new(block, self.name, self.signature_service.clone()).await)
     }
 
-    async fn commit(&mut self, block: Block) -> ConsensusResult<()> {
-        if self.last_committed_view >= block.view {
-            return Ok(());
-        }
-        self.last_committed_view = block.view;
+    async fn commit(&mut self, block: &Block) -> ConsensusResult<()> {
+        let committing = self.committing_block.clone();
 
-        info!("Committed {}", block);
-        if let Err(e) = self.tx_commit.send(block).await {
-            warn!("Failed to send block through the commit channel: {}", e);
+        if committing.view == block.qc.view && committing.digest() == block.qc.hash {
+            self.store_block(&committing).await;
+            self.last_committed_view = committing.view;
+
+            info!("Committed {}", committing);
+            if let Err(e) = self.tx_commit.send(committing).await {
+                warn!("Failed to send block through the commit channel: {}", e);
+            }
         }
+
+        self.committing_block = block.clone();
 
         Ok(())
     }
@@ -143,6 +149,8 @@ impl Core {
 
             // Make a new block if we are the next leader.
             if self.name == self.committee.leader {
+                // TODO: Remove this when in production
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 self.generate_proposal().await;
             }
         }
@@ -155,7 +163,7 @@ impl Core {
 
         let mut checkpoint = self.high_qc.view.checkpoint;
         let mut round = self.high_qc.view.round;
-        let is_new_checkpoint = false; // this must be set appropriately based on fee logic
+        let is_new_checkpoint = false; // this must be set appropriately based on batch logic
         if is_new_checkpoint {
             checkpoint += 1;
             round = 0;
@@ -164,7 +172,9 @@ impl Core {
         }
         let view = View::new(checkpoint, round);
 
-        // TODO: This must be based on the feed logic
+        self.last_msg_sequence_number += 1;
+
+        // TODO: This must be based on the batch logic
         let proposal = MakeProposal {
             view,
             parent_round: BigInt::default(),
@@ -187,6 +197,7 @@ impl Core {
         // See if we can vote for this block.
         if let Some(vote) = self.try_make_vote(block).await {
             debug!("Created {:?}", vote);
+
             if self.name == self.committee.leader {
                 self.handle_vote(&vote).await?;
             } else {
@@ -197,6 +208,8 @@ impl Core {
                     .await
                     .expect("Failed to send vote");
             }
+
+            self.commit(&block).await?;
         }
         Ok(())
     }

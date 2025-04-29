@@ -1,8 +1,13 @@
-use clap::Args;
-use libp2p::{Multiaddr, PeerId};
-use std::{path::PathBuf, str::FromStr};
-
 use crate::protocol::Network;
+use clap::Args;
+use libp2p::{
+    identity::{self, ed25519},
+    multiaddr::multiaddr,
+    Multiaddr, PeerId,
+};
+use std::{fs::File, io::Write, path::PathBuf, str::FromStr};
+
+pub const TESTING_PEERS_FILE: &str = "/tmp/authority_peers";
 
 #[derive(Args, Clone)]
 pub struct TransportArgs {
@@ -43,6 +48,60 @@ pub struct TransportArgs {
 impl TransportArgs {
     pub fn listen_addrs(&self) -> Vec<Multiaddr> {
         self.p2p_listen_addrs.clone()
+    }
+
+    pub fn testing_args(nodes: u16) -> Vec<TransportArgs> {
+        let base_port = 9000;
+        let mut args = Vec::new();
+        let mut peer_infos = Vec::new();
+
+        let mut authority_file =
+            File::create(TESTING_PEERS_FILE).expect("Failed to create authority file");
+
+        for i in 0..nodes {
+            // Generate a random keypair
+            let keypair = ed25519::Keypair::generate();
+            let peer_id = PeerId::from(
+                identity::Keypair::ed25519_from_bytes(keypair.to_bytes())
+                    .unwrap()
+                    .public(),
+            );
+
+            // Save peer_id to file
+            writeln!(authority_file, "{peer_id}").unwrap();
+
+            let port = base_port + i;
+            let addr: Multiaddr = multiaddr!(Ip4([127, 0, 0, 1]), Udp(port), QuicV1);
+            let key_path = PathBuf::from(format!("/tmp/{peer_id}-key"));
+
+            let mut key_file = File::create(&key_path).expect("Failed to create key file");
+
+            key_file
+                .write_all(keypair.to_bytes().as_ref())
+                .expect("Failed to write key file");
+
+            peer_infos.push((peer_id.clone(), addr.clone()));
+
+            let boot_nodes = if i == 0 {
+                vec![]
+            } else {
+                let (boot_peer, boot_addr) = &peer_infos[0];
+                vec![BootNode {
+                    peer_id: boot_peer.clone(),
+                    address: boot_addr.clone(),
+                }]
+            };
+
+            args.push(TransportArgs {
+                key: key_path,
+                p2p_listen_addrs: vec![addr.clone()],
+                p2p_public_addrs: vec![addr],
+                boot_nodes,
+                network: Network::Testnet,
+            });
+        }
+
+        args
     }
 }
 

@@ -49,7 +49,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(
+    pub fn new(
         transport: TransportArgs,
         committee_file: &str,
         key_file: &str,
