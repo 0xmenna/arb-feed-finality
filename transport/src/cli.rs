@@ -7,7 +7,7 @@ use libp2p::{
 };
 use std::{fs::File, io::Write, path::PathBuf, str::FromStr};
 
-pub const TESTING_PEERS_FILE: &str = "/tmp/authority_peers";
+pub const TESTING_PEERS_FILE: &str = "testnet/authority_peers";
 
 #[derive(Args, Clone)]
 pub struct TransportArgs {
@@ -61,18 +61,15 @@ impl TransportArgs {
         for i in 0..nodes {
             // Generate a random keypair
             let keypair = ed25519::Keypair::generate();
-            let peer_id = PeerId::from(
-                identity::Keypair::ed25519_from_bytes(keypair.to_bytes())
-                    .unwrap()
-                    .public(),
-            );
+            let identity_keypair: identity::Keypair = keypair.clone().into();
+            let peer_id = PeerId::from(identity_keypair.public());
 
             // Save peer_id to file
             writeln!(authority_file, "{peer_id}").unwrap();
 
             let port = base_port + i;
             let addr: Multiaddr = multiaddr!(Ip4([127, 0, 0, 1]), Udp(port), QuicV1);
-            let key_path = PathBuf::from(format!("/tmp/{peer_id}-key"));
+            let key_path = PathBuf::from(format!("testnet/{peer_id}-key"));
 
             let mut key_file = File::create(&key_path).expect("Failed to create key file");
 

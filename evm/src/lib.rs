@@ -6,14 +6,8 @@ pub use ethers::{
 };
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Copy)]
+#[derive(Debug, Encode, Decode, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Copy)]
 pub struct BigInt(pub U256);
-
-impl Encode for BigInt {
-    fn encode(&self) -> Vec<u8> {
-        self.0 .0.encode()
-    }
-}
 
 impl std::ops::Add for BigInt {
     type Output = Self;
@@ -46,19 +40,6 @@ impl BigInt {
 
     pub fn zero() -> Self {
         Self(U256::zero())
-    }
-}
-
-impl Decode for BigInt {
-    fn decode<I: codec::Input>(input: &mut I) -> std::result::Result<Self, codec::Error> {
-        let mut u256 = [0u64; 4];
-        let decode = &Vec::<u64>::decode(input)?;
-        if decode.len() != 4 {
-            return Err(codec::Error::from("Invalid BigInt length"));
-        }
-        u256.copy_from_slice(&decode[..]);
-
-        Ok(Self(U256(u256)))
     }
 }
 

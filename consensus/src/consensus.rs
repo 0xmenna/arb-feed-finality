@@ -12,8 +12,10 @@ use feed::batch_maker::{BatchMakerResult, MiniBatchFeed};
 use feed::source::BroadcastFeedMessage;
 use log::info;
 use std::error::Error;
+use std::time::Duration;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::oneshot;
 use transport::{MessageHandler, Publisher};
 
 /// The default channel capacity for each channel of the consensus.
@@ -68,15 +70,16 @@ impl Consensus {
         // rx_feed: Receiver<BroadcastFeedMessage>,
         // tx_mini_batch: Sender<MiniBatchFeed>,
         // rx_batch_maker: Receiver<BatchMakerResult>,
-        tx_network_publisher: Publisher,
+        network_publisher: Publisher,
         tx_commit: Sender<Block>,
-    ) -> ConsensusReceiverHandler {
+        proposal_min_interval: Duration,
+    ) -> (oneshot::Sender<()>, ConsensusReceiverHandler) {
         let (tx_consensus, rx_consensus) = channel(CHANNEL_CAPACITY);
         let (tx_loopback, rx_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_proposer, rx_proposer) = channel(CHANNEL_CAPACITY);
 
         // Spawn the consensus core.
-        Core::spawn(
+        let tx_transport_ready = Core::spawn(
             name,
             committee.clone(),
             signature_service.clone(),
@@ -85,7 +88,8 @@ impl Consensus {
             rx_loopback,
             tx_proposer,
             tx_commit,
-            tx_network_publisher.clone(),
+            network_publisher.clone(),
+            proposal_min_interval,
         );
 
         if name == committee.leader {
@@ -96,12 +100,15 @@ impl Consensus {
                 signature_service,
                 /* rx_message */ rx_proposer,
                 tx_loopback,
-                tx_network_publisher,
+                network_publisher,
             );
         }
 
-        // Return the network handler.
-        ConsensusReceiverHandler { tx_consensus }
+        (
+            tx_transport_ready,
+            // Return the network handler.
+            ConsensusReceiverHandler { tx_consensus },
+        )
     }
 }
 

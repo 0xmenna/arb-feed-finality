@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt::{Display, Formatter},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -19,9 +20,12 @@ use libp2p::{
 };
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{
-    mpsc::{Receiver, Sender},
-    oneshot,
+use tokio::{
+    sync::{
+        mpsc::{Receiver, Sender},
+        oneshot,
+    },
+    time::{interval, Interval},
 };
 
 pub mod behaviour;
@@ -80,7 +84,7 @@ macro_rules! get_agent_info {
 }
 
 #[async_trait]
-pub trait MessageHandler: Clone + Send + Sync + 'static {
+pub trait MessageHandler: Send + Sync + 'static {
     /// Defines how to handle an incoming message.
     async fn dispatch(&self, message: Bytes) -> Result<(), Box<dyn core::error::Error>>;
 }
@@ -100,7 +104,6 @@ pub trait TopicHandler: Clone + Send + Sync + 'static {
 /// The p2p swarm
 pub type NodeSwarm = Swarm<Wrapped<BaseBehaviour>>;
 
-/// It publishes messages to a specific topic
 pub type Publisher = Sender<(&'static str, Bytes)>;
 
 /// Convenient alias for cancel handlers returned to the caller task.
@@ -111,10 +114,14 @@ pub struct P2PTransport<Handler: TopicHandler> {
     swarm: NodeSwarm,
     /// Reading dispatcher for incoming topic messages
     handler: Handler,
-    /// Recieved messages for publishing them to a topic
+    /// Received messages for publishing them to a topic
     rx_publisher: Receiver<(&'static str, Bytes)>,
     /// Known topics
-    topics: HashMap<String, ()>,
+    topics: HashMap<String, Vec<Bytes>>,
+    /// Queue for messages that failed to publish
+    retry_queue: VecDeque<(String, Bytes)>,
+    /// Retry interval for failed messages
+    retry_interval: Interval,
 }
 
 impl<Handler: TopicHandler> P2PTransport<Handler> {
@@ -122,6 +129,7 @@ impl<Handler: TopicHandler> P2PTransport<Handler> {
         args: TransportArgs,
         handler: Handler,
         rx_publisher: Receiver<(&'static str, Bytes)>,
+        retry_interval: Duration,
     ) {
         let agent_info = get_agent_info!();
         let builder =
@@ -137,9 +145,11 @@ impl<Handler: TopicHandler> P2PTransport<Handler> {
                 handler,
                 rx_publisher,
                 topics: HashMap::new(),
+                retry_queue: VecDeque::new(),
+                retry_interval: interval(retry_interval),
             }
             .run()
-            .await
+            .await;
         });
     }
 
@@ -147,32 +157,49 @@ impl<Handler: TopicHandler> P2PTransport<Handler> {
         // Subscribe to all topics managed by the handler
         for topic in self.handler.topics() {
             self.swarm.behaviour_mut().subscribe(topic);
-            self.topics.insert(topic.to_string(), ());
+            self.topics.insert(topic.to_string(), Vec::new());
         }
 
         loop {
             tokio::select! {
                 // Publish message to given topic
                 Some((topic, data)) = self.rx_publisher.recv() => {
-                    if self.topics.get(topic).is_none() {
-                        // Subscribe to topic and add to known topics
-                        self.swarm.behaviour_mut().subscribe(topic);
-                        self.topics.insert(topic.to_string(), ());
+                    match self.swarm.behaviour_mut().publish_message(topic, data.clone()) {
+                        Ok(_) => debug!("Message published to {}", topic),
+                        Err(e) => {
+                            warn!("Cannot publish to {}: {:?}. Queuing for retry.", topic, e);
+                            self.retry_queue.push_back((topic.to_string(), data));
+                        }
                     }
-                    self.swarm.behaviour_mut().publish_message(topic, data);
+                },
+
+                // Retry failed messages periodically
+                _ = self.retry_interval.tick() => {
+                    let mut remaining = VecDeque::new();
+                    while let Some((topic, data)) = self.retry_queue.pop_front() {
+                        match self.swarm.behaviour_mut().publish_message(&topic, data.clone()) {
+                            Ok(_) => debug!("Retried and published message to {}", topic),
+                            Err(e) => {
+                                warn!("Retry failed for {}: {:?}", topic, e);
+                                remaining.push_back((topic, data));
+                            }
+                        }
+                    }
+                    // Put back any messages that still failed
+                    self.retry_queue = remaining;
                 },
 
                 // Handle swarm events
                 event = self.swarm.select_next_some() => {
                     match event {
                         SwarmEvent::Behaviour(BaseBehaviourEvent::Gossipsub(msg)) => {
+                            // Incoming published message
                             let topic = msg.topic;
-
-                            // Dispatch message
                             if let Err(e) = self.handler.dispatch(topic, msg.message.into()).await {
-                                    warn!("{}", e);
-                                }
+                                warn!("Dispatch error: {}", e);
+                            }
                         },
+
                         other => {
                             debug!("Other swarm event: {:?}", other);
                         }

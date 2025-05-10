@@ -105,6 +105,9 @@ async fn main() {
 }
 
 fn deploy_testbed(nodes: u16) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error::Error>> {
+
+    let _ = fs::create_dir_all("testnet");
+
     let keys: Vec<_> = (0..nodes).map(|_| Secret::new()).collect();
 
     if keys.is_empty() {
@@ -126,7 +129,7 @@ fn deploy_testbed(nodes: u16) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error:
         leader,
         epoch,
     );
-    let committee_file = "committee.json";
+    let committee_file = "testnet/committee.json";
     let _ = fs::remove_file(committee_file);
     Committee {
         consensus: consensus_committee,
@@ -140,11 +143,11 @@ fn deploy_testbed(nodes: u16) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error:
     keys.iter()
         .enumerate()
         .map(|(i, keypair)| {
-            let key_file = format!("node_{}.json", i);
+            let key_file = format!("testnet/node_{}.json", i);
             let _ = fs::remove_file(&key_file);
             keypair.write(&key_file)?;
 
-            let store_path = format!("db_{}", i);
+            let store_path = format!("testnet/db_{}", i);
             let _ = fs::remove_dir_all(&store_path);
 
             let transport = transports[i].clone();

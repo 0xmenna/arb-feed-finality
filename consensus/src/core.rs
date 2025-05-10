@@ -12,8 +12,11 @@ use crypto::{PublicKey, SignatureService};
 use evm::BigInt;
 use log::{debug, error, info, warn};
 use std::cmp::max;
+use std::time::Duration;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
+use tokio::time::{sleep, Instant};
 use transport::protocol::BLOCK_VOTES_TOPIC;
 use transport::Publisher;
 
@@ -33,6 +36,8 @@ pub struct Core {
     high_qc: QC,
     aggregator: Aggregator,
     network_publisher: Publisher,
+    last_proposal_time: Instant,
+    proposal_min_interval: Duration,
 }
 
 impl Core {
@@ -46,8 +51,12 @@ impl Core {
         rx_loopback: Receiver<Block>,
         tx_proposer: Sender<MakeProposal>,
         tx_commit: Sender<Block>,
-        tx_publisher: Publisher,
-    ) {
+        network_publisher: Publisher,
+        proposal_min_interval: Duration,
+    ) -> oneshot::Sender<()> {
+        // Consensus core is being notified when the network is ready.
+        let (ready_tx, ready_rx) = oneshot::channel();
+
         tokio::spawn(async move {
             Self {
                 name,
@@ -64,11 +73,15 @@ impl Core {
                 committing_block: Block::genesis(),
                 high_qc: QC::genesis(),
                 aggregator: Aggregator::new(committee),
-                network_publisher: tx_publisher,
+                network_publisher,
+                proposal_min_interval,
+                last_proposal_time: Instant::now(),
             }
-            .run()
+            .run(ready_rx)
             .await
         });
+
+        ready_tx
     }
 
     async fn store_block(&mut self, block: &Block) {
@@ -149,9 +162,15 @@ impl Core {
 
             // Make a new block if we are the next leader.
             if self.name == self.committee.leader {
-                // TODO: Remove this when in production
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // This is just to avoid flooding the network if quorum is reached too fast.
+                let since_last = Instant::now().duration_since(self.last_proposal_time);
+                if since_last < self.proposal_min_interval {
+                    let wait = self.proposal_min_interval - since_last;
+                    debug!("Waiting {:?} before next proposal", wait);
+                    sleep(wait).await;
+                }
                 self.generate_proposal().await;
+                self.last_proposal_time = Instant::now();
             }
         }
         Ok(())
@@ -159,7 +178,7 @@ impl Core {
 
     #[async_recursion]
     async fn generate_proposal(&mut self) {
-        // Might implement here logic of feed construction
+        // TODO: Might implement here logic of feed construction
 
         let mut checkpoint = self.high_qc.view.checkpoint;
         let mut round = self.high_qc.view.round;
@@ -172,13 +191,14 @@ impl Core {
         }
         let view = View::new(checkpoint, round);
 
-        self.last_msg_sequence_number += 1;
+        // TODO: This will have to be based on the batch logic
+        let new_msg_sequence_number = self.last_msg_sequence_number + 1;
 
         // TODO: This must be based on the batch logic
         let proposal = MakeProposal {
             view,
             parent_round: BigInt::default(),
-            last_feed_sequence_number: self.last_msg_sequence_number,
+            last_feed_sequence_number: new_msg_sequence_number,
             batch_poster_digest: Digest::default(),
             feed_merkle_root: Digest::default(),
             qc: self.high_qc.clone(),
@@ -211,6 +231,7 @@ impl Core {
 
             self.commit(&block).await?;
         }
+
         Ok(())
     }
 
@@ -225,9 +246,12 @@ impl Core {
         self.process_block(block).await
     }
 
-    pub async fn run(&mut self) {
-        // Upon booting, generate the very first block (if we are the leader).
+    pub async fn run(&mut self, ready_rx: oneshot::Receiver<()>) {
+        // Wait for the network to be ready.
+        ready_rx.await.expect("Failed to receive ready signal");
+
         if self.name == self.committee.leader {
+            // Upon booting, generate the very first block (only if we are the leader).
             self.generate_proposal().await;
         }
 

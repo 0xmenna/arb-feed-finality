@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use consensus::{Block, Consensus, ConsensusReceiverHandler};
 use crypto::SignatureService;
-use log::info;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 use transport::cli::TransportArgs;
@@ -12,6 +11,7 @@ use transport::{
     protocol::{BLOCK_PROPOSALS_TOPIC, BLOCK_VOTES_TOPIC},
     MessageHandler, P2PTransport, TopicHandler,
 };
+use std::time::Duration;
 
 /// The default channel capacity for this module.
 pub const CHANNEL_CAPACITY: usize = 1_000;
@@ -67,7 +67,7 @@ impl Node {
 
         // Load default parameters if none are specified.
         // TODO: add custom parameters.
-        let _parameters = match parameters {
+        let parameters = match parameters {
             Some(filename) => Parameters::read(&filename)?,
             None => Parameters::default(),
         };
@@ -79,7 +79,7 @@ impl Node {
         let signature_service = SignatureService::new(secret_key);
 
         // Run the consensus core.
-        let consensus_handler = Consensus::spawn(
+        let (transport_signal, consensus_handler) = Consensus::spawn(
             name,
             committee.consensus,
             // parameters.consensus, // TODO: we will surely need other parameters for consensus
@@ -87,6 +87,7 @@ impl Node {
             store,
             tx_publisher,
             tx_commit,
+            Duration::from_millis(parameters.proposal_min_interval),
         );
 
         // Run the p2p transport.
@@ -96,9 +97,12 @@ impl Node {
                 consensus: consensus_handler,
             },
             rx_publisher,
+            Duration::from_millis(parameters.retry_interval),
         );
+        transport_signal.send(()).expect("Cannot send ready signal");
 
-        info!("Node {} successfully booted", name);
+
+        log::info!("Node {} successfully booted", name);
         Ok(Self { commit: rx_commit })
     }
 

@@ -13,7 +13,7 @@ pub fn get_keypair(path: Option<PathBuf>) -> anyhow::Result<Keypair> {
     };
     match std::fs::metadata(&path) {
         Ok(meta) if meta.is_file() => {
-            log::info!("Reading key from {}", path.display());
+            log::debug!("Reading key from {}", path.display());
             let mut content = std::fs::read(&path)?;
             let keypair = ed25519::Keypair::try_from_bytes(content.as_mut_slice())?;
             Ok(keypair.into())

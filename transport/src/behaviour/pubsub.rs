@@ -188,6 +188,13 @@ impl TopicState {
     }
 }
 
+#[derive(Debug)]
+pub enum PubSubError {
+    UnknownTopic,
+    InsufficientPeers,
+    Other(PublishError),
+}
+
 #[derive(Derivative, Clone)]
 #[derivative(Debug)]
 pub struct PubsubMsg {
@@ -220,7 +227,7 @@ impl PubsubBehaviour {
     }
 
     pub fn subscribe(&mut self, topic_name: &'static str, validation_config: MsgValidationConfig) {
-        log::info!("Subscribing to topic {topic_name}");
+        log::debug!("Subscribing to topic {topic_name}");
         let topic = TopicState::new(topic_name, validation_config);
         let topic_hash = topic.topic.hash();
         if self.topics.contains_key(&topic_hash) {
@@ -232,24 +239,26 @@ impl PubsubBehaviour {
             return;
         }
         self.topics.insert(topic_hash, topic);
-        log::info!("Topic {topic_name} subscribed");
     }
 
-    pub fn publish(&mut self, topic_name: &str, msg: impl Into<Vec<u8>>) {
-        log::debug!("Publishing message to topic {topic_name}");
+    pub fn publish(
+        &mut self,
+        topic_name: &str,
+        msg: impl Into<Vec<u8>>,
+    ) -> Result<(), PubSubError> {
         let topic_hash = Sha256Topic::new(topic_name).hash();
         let Some(topic) = self.topics.get(&topic_hash) else {
-            return log::error!("Cannot publish to unsubscribed topic: {topic_name}");
+            return Err(PubSubError::UnknownTopic);
         };
 
         match self.inner.publish(topic_hash, msg) {
             Err(PublishError::InsufficientPeers)
                 if topic.subscribed_at.elapsed() <= SUBSCRIPTION_TIMEOUT =>
             {
-                log::info!("Waiting for peers to be able to publish to {topic_name}")
+                Err(PubSubError::InsufficientPeers)
             }
-            Err(e) => log::error!("Error publishing message to {topic_name}: {e:?}"),
-            Ok(_) => log::debug!("Message published to {topic_name}"),
+            Err(e) => Err(PubSubError::Other(e)),
+            Ok(_) => Ok(()),
         }
     }
 
@@ -277,6 +286,12 @@ impl PubsubBehaviour {
             topic: topic_state.name,
             data: msg.data.into_boxed_slice(),
         })
+    }
+
+    pub fn mesh_peers(&self, topic_name: &str) -> usize {
+        let topic_hash = Sha256Topic::new(topic_name).hash();
+
+        self.inner.mesh_peers(&topic_hash).count()
     }
 }
 

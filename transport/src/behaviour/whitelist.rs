@@ -73,7 +73,7 @@ impl WhitelistBehavior {
             log::debug!("Registered nodes set unchanged.");
             return None;
         }
-        log::info!("Updating registered nodes");
+        log::debug!("Updating registered nodes");
         // Disallow nodes which are no longer registered
         for peer_id in self.registered_nodes.difference(&nodes) {
             log::debug!("Blocking peer {peer_id}");

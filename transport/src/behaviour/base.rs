@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     addr_cache::AddressCache,
-    pubsub::{MsgValidationConfig, PubsubBehaviour, PubsubMsg, ValidationError},
+    pubsub::{MsgValidationConfig, PubSubError, PubsubBehaviour, PubsubMsg, ValidationError},
     whitelist::{WhitelistBehavior, WhitelistConfig},
     wrapped::{BehaviourWrapper, TToSwarm, Wrapped},
 };
@@ -135,7 +135,7 @@ impl BaseBehaviour {
         agent_info: AgentInfo,
     ) -> Self {
         let local_peer_id = keypair.public().to_peer_id();
-        log::info!("Local peer id: {local_peer_id}");
+        log::debug!("Local peer id: {local_peer_id}");
         let mut kad_config = kad::Config::new(dht_protocol);
         kad_config.set_query_timeout(config.kad_query_timeout);
         let mut inner = InnerBehaviour {
@@ -210,8 +210,8 @@ impl BaseBehaviour {
         self.inner.pubsub.subscribe(&topic, config);
     }
 
-    pub fn publish_message(&mut self, topic: &'static str, msg: Bytes) {
-        self.inner.pubsub.publish(topic, msg);
+    pub fn publish_message(&mut self, topic: &str, msg: Bytes) -> Result<(), PubSubError> {
+        self.inner.pubsub.publish(topic, msg)
     }
 
     pub fn find_and_dial(&mut self, peer_id: PeerId) {
@@ -304,6 +304,10 @@ impl BaseBehaviour {
             peer_id,
             result: ProbeResult::Timeout,
         }))
+    }
+
+    pub fn mesh_peers(&self, topic: &str) -> usize {
+        self.inner.pubsub.mesh_peers(topic)
     }
 
     pub fn allow_peer(&mut self, peer_id: PeerId) {
