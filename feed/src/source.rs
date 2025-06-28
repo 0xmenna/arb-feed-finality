@@ -110,7 +110,7 @@ pub struct FeedSource {
 
 impl FeedSource {
     /// Spawns a new feed source that connects to the given feed URL and sends messages to the given channel.
-    pub async fn spawn(feed_url: String, tx: Sender<BroadcastMessage>, poll_interval: Interval) {
+    pub fn spawn(feed_url: String, tx: Sender<BroadcastMessage>, poll_interval: Interval) {
         tokio::spawn(async move {
             Self {
                 feed_url,

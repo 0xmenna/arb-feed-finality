@@ -9,6 +9,12 @@ use serde::Deserialize;
 #[derive(Debug, Encode, Decode, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Copy)]
 pub struct BigInt(pub U256);
 
+impl From<u128> for BigInt {
+    fn from(val: u128) -> Self {
+        Self(U256::from(val))
+    }
+}
+
 impl std::ops::Add for BigInt {
     type Output = Self;
 
@@ -50,6 +56,17 @@ impl<'de> Deserialize<'de> for BigInt {
     {
         let n = deserialize_number(deserializer)?;
         Ok(BigInt::from(n))
+    }
+}
+
+// implement serialization for BigInt
+impl serde::Serialize for BigInt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let n: U256 = self.0;
+        serializer.serialize_str(&n.to_string())
     }
 }
 

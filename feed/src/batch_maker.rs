@@ -7,8 +7,8 @@ use crate::{
 use brotli::CompressorWriter;
 use codec::Encode;
 use crypto::{keccak, Digest};
-use evm::{abi, Address, BigInt};
-use log::{debug, warn};
+use evm::{abi, Address};
+use log::debug;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -22,24 +22,26 @@ const MAX_SEGMENTS_PER_SEQUENCER_MESSAGE: usize = 100 * 1024;
 
 const BROTLI_MESSAGE_HEADER_BYTE: u8 = 0;
 
-type Round = BigInt;
+type Round = u64;
 
 /// Whether to close the batch or not and the digest of the resulting batch
 pub enum BatchMakerResult {
-    /// The batch is ongoing and has not yet been closed. It cointains the batch digest
-    Ongoing(BuildingBatchDigest),
-    /// A new batch with the new associated digest
-    New(BuildingBatchDigest),
-    /// An error occured while processing the batch
-    Error(anyhow::Error),
+    /// The batch is ongoing and has not yet been closed
+    Ongoing(BuildingBatchMeta),
+    /// A new batch
+    New(BuildingBatchMeta),
 }
 
 pub struct MiniBatchFeed {
-    round: Round,
-    messages: Vec<BroadcastFeedMessage>,
+    pub round: Round,
+    pub messages: Vec<BroadcastFeedMessage>,
 }
 
-pub type BuildingBatchDigest = Digest;
+#[derive(Debug, Clone)]
+pub struct BuildingBatchMeta {
+    pub digest: Digest,
+    pub latest_seq_num: u64,
+}
 
 struct OngoingBatch {
     /// The opening round of the ongoing building batch
@@ -55,7 +57,7 @@ struct OngoingBatch {
 impl OngoingBatch {
     pub fn new(position: BatchPosterPosition) -> Self {
         Self {
-            opening_round: Round::zero(),
+            opening_round: 0,
             size: 0,
             batch: BuildingBatch::new(
                 position.msg_count,
@@ -111,7 +113,7 @@ impl OngoingBatch {
     }
 
     pub fn is_opened(&self) -> bool {
-        !self.opening_round.is_zero()
+        !(self.opening_round == 0)
     }
 
     pub fn open(&mut self, round: Round) {
@@ -212,14 +214,7 @@ impl BatchMaker {
                         .map(|msg| msg.message.message.l2_msg.size())
                         .sum();
 
-                    // If the mini batch alone exceeds the maximum allowed size, error out.
-                    if mini_batch_size > self.max_size {
-                        warn!("Mini batch cannot be handled because it exceeds the batch maximum size");
-                        self.tx_result.send(
-                            BatchMakerResult::Error(anyhow::anyhow!("Mini batch exceeds maximum size"))
-                        ).await.expect("Failed to send error result");
-                        continue;
-                    }
+                    assert!(mini_batch_size <= self.max_size, "The mini batch is not expected to exceed the maximum size");
 
                     // Check if adding this mini batch would exceed the ongoing batch size.
                     let new_batch_size = ongoing_batch.size() + mini_batch_size;
@@ -243,7 +238,8 @@ impl BatchMaker {
                         let (batch, digest, batchposter_data) = ongoing_batch
                             .close_batch()
                             .expect("Batch is expected to be closed");
-                        debug_assert!(committed_batch.is_none());
+
+                        // debug_assert!(committed_batch.is_none());
 
                         // Update the batch poster position for the next batch.
                         self.batchposter_pos = BatchPosterPosition {
@@ -265,7 +261,6 @@ impl BatchMaker {
                         // Start the new batch with the size of the current mini batch.
                         ongoing_batch.size = mini_batch_size;
                     }
-
                     // Process each message in the mini batch.
                     for msg in mini_batch.messages.iter() {
                         debug!(
@@ -283,10 +278,14 @@ impl BatchMaker {
                     ongoing_batch = batch;
 
                     // Send either a new or ongoing batch result based on whether the batch was sealed.
+                    let building_batch_meta = BuildingBatchMeta {
+                        digest,
+                        latest_seq_num,
+                    };
                     let result = if seal_batch {
-                        BatchMakerResult::New(digest)
+                        BatchMakerResult::New(building_batch_meta)
                     } else {
-                        BatchMakerResult::Ongoing(digest)
+                        BatchMakerResult::Ongoing(building_batch_meta)
                     };
                     self.tx_result.send(result).await.expect("Failed to send batch result");
                 },
@@ -301,7 +300,7 @@ impl BatchMaker {
                     committed_batch = None;
 
                     // TODO: Delete old committed batches
-                }
+                },
             }
         }
     }

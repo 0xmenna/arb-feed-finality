@@ -5,6 +5,7 @@ use bytes::Bytes;
 use consensus::{Block, Consensus, ConsensusReceiverHandler};
 use crypto::SignatureService;
 use store::Store;
+use feed::{source::FeedSource, processor::Processor as FeedProcessor};
 use tokio::sync::mpsc::{channel, Receiver};
 use transport::cli::TransportArgs;
 use transport::{
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 /// The default channel capacity for this module.
 pub const CHANNEL_CAPACITY: usize = 1_000;
+pub const L2_MSG_CHANNEL_CAPACITY: usize = 10_000;
 
 pub const CONSENSUS_TOPICS: [&str; 2] = [BLOCK_PROPOSALS_TOPIC, BLOCK_VOTES_TOPIC];
 
@@ -49,7 +51,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(
+    pub async fn new(
         transport: TransportArgs,
         committee_file: &str,
         key_file: &str,
@@ -58,6 +60,8 @@ impl Node {
     ) -> Result<Self, ConfigError> {
         let (tx_commit, rx_commit) = channel(CHANNEL_CAPACITY);
         let (tx_publisher, rx_publisher) = channel(CHANNEL_CAPACITY);
+        let (tx_feed, rx_feed) = channel(CHANNEL_CAPACITY);
+        let (tx_l2_msg, rx_l2_msg) = channel(L2_MSG_CHANNEL_CAPACITY);
 
         // Read the committee and secret key from file.
         let committee = Committee::read(committee_file)?;
@@ -78,7 +82,19 @@ impl Node {
         // Run the signature service.
         let signature_service = SignatureService::new(secret_key);
 
-        // Run the consensus core.
+        // Run the feed source.
+        FeedSource::spawn(parameters.feed_source, tx_feed, 
+           tokio::time::interval(Duration::from_millis(parameters.feed_poll_interval)),
+        );
+
+        // Run the feed processor. It extracts L2 messages from the feed and sends them to the consensus core. It also reads from the store the current batch poster position.
+        let batchposter_pos = FeedProcessor::spawn(
+            store.clone(),
+            rx_feed,
+            tx_l2_msg
+        );
+
+        // Run the consensus.
         let (transport_signal, consensus_handler) = Consensus::spawn(
             name,
             committee.consensus,
@@ -88,6 +104,10 @@ impl Node {
             tx_publisher,
             tx_commit,
             Duration::from_millis(parameters.proposal_min_interval),
+            parameters.consensus.max_batch_size as usize,
+            parameters.consensus.max_batch_parent_rounds,
+            batchposter_pos.await,
+            rx_l2_msg,
         );
 
         // Run the p2p transport.
@@ -97,7 +117,7 @@ impl Node {
                 consensus: consensus_handler,
             },
             rx_publisher,
-            Duration::from_millis(parameters.retry_interval),
+            Duration::from_millis(parameters.transport_retry),
         );
         transport_signal.send(()).expect("Cannot send ready signal");
 

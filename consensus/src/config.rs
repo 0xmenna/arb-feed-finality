@@ -10,6 +10,8 @@ pub type EpochNumber = u128;
 pub struct Parameters {
     pub timeout_delay: u64,
     pub sync_retry_delay: u64,
+    pub max_batch_size: u32,
+    pub max_batch_parent_rounds: u64,
 }
 
 impl Default for Parameters {
@@ -17,6 +19,8 @@ impl Default for Parameters {
         Self {
             timeout_delay: 5_000,
             sync_retry_delay: 10_000,
+            max_batch_size: 90_000,
+            max_batch_parent_rounds: 25,
         }
     }
 }

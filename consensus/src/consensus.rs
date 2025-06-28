@@ -8,9 +8,9 @@ use bytes::Bytes;
 use codec::{Decode, Encode};
 use crypto::{PublicKey, SignatureService};
 use evm::BigInt;
-use feed::batch_maker::{BatchMakerResult, MiniBatchFeed};
+use feed::batch_maker::BatchMaker;
+use feed::processor::BatchPosterPosition;
 use feed::source::BroadcastFeedMessage;
-use log::info;
 use std::error::Error;
 use std::time::Duration;
 use store::Store;
@@ -47,6 +47,10 @@ impl View {
         (self.checkpoint == prev.checkpoint && self.round == prev.round + 1)
             || (self.checkpoint == prev.checkpoint + 1 && self.round == 0)
     }
+
+    pub fn is_next_checkpoint_of(&self, prev: &Self) -> bool {
+        self.checkpoint == prev.checkpoint + 1 && self.round == 0
+    }
 }
 
 pub type ParentRound = BigInt;
@@ -73,10 +77,17 @@ impl Consensus {
         network_publisher: Publisher,
         tx_commit: Sender<Block>,
         proposal_min_interval: Duration,
+        batch_max_size: usize,
+        batch_max_rounds: u64,
+        batch_poster_position: BatchPosterPosition,
+        rx_l2_msg: Receiver<BroadcastFeedMessage>,
     ) -> (oneshot::Sender<()>, ConsensusReceiverHandler) {
         let (tx_consensus, rx_consensus) = channel(CHANNEL_CAPACITY);
         let (tx_loopback, rx_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_proposer, rx_proposer) = channel(CHANNEL_CAPACITY);
+        let (tx_mini_batch, rx_mini_batch) = channel(CHANNEL_CAPACITY);
+        let (tx_batch_res, rx_batch_res) = channel(CHANNEL_CAPACITY);
+        let (tx_commit_batch, rx_commit_batch) = channel(CHANNEL_CAPACITY);
 
         // Spawn the consensus core.
         let tx_transport_ready = Core::spawn(
@@ -90,13 +101,26 @@ impl Consensus {
             tx_commit,
             network_publisher.clone(),
             proposal_min_interval,
+            rx_l2_msg,
+            tx_mini_batch,
+            batch_max_size,
+            rx_batch_res,
+            tx_commit_batch,
+        );
+
+        BatchMaker::spawn(
+            batch_max_size,
+            batch_max_rounds,
+            batch_poster_position,
+            rx_mini_batch,
+            store,
+            tx_batch_res,
+            rx_commit_batch,
         );
 
         if name == committee.leader {
             // Spawn the block proposer.
             Proposer::spawn(
-                name,
-                committee.clone(),
                 signature_service,
                 /* rx_message */ rx_proposer,
                 tx_loopback,
