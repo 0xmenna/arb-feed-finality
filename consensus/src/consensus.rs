@@ -30,11 +30,7 @@ pub struct View {
 
 impl std::fmt::Display for View {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "View {{ checkpoint: {}, round: {} }}",
-            self.checkpoint, self.round
-        )
+        write!(f, " checkpoint: {}, round: {}", self.checkpoint, self.round)
     }
 }
 

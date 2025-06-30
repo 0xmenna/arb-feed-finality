@@ -25,6 +25,7 @@ const BROTLI_MESSAGE_HEADER_BYTE: u8 = 0;
 type Round = u64;
 
 /// Whether to close the batch or not and the digest of the resulting batch
+#[derive(Debug, Clone)]
 pub enum BatchMakerResult {
     /// The batch is ongoing and has not yet been closed
     Ongoing(BuildingBatchMeta),
@@ -41,6 +42,7 @@ pub struct MiniBatchFeed {
 pub struct BuildingBatchMeta {
     pub digest: Digest,
     pub latest_seq_num: u64,
+    pub size: usize,
 }
 
 struct OngoingBatch {
@@ -281,6 +283,7 @@ impl BatchMaker {
                     let building_batch_meta = BuildingBatchMeta {
                         digest,
                         latest_seq_num,
+                        size: ongoing_batch.size(),
                     };
                     let result = if seal_batch {
                         BatchMakerResult::New(building_batch_meta)

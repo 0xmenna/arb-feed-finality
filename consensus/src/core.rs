@@ -204,6 +204,10 @@ impl Core {
             let safety_rule_6 = block.batch_poster_digest == digest;
 
             if !(safety_rule_4 && safety_rule_5 && safety_rule_6) {
+                info!(
+                    "Safety rules not satisfied: {:?}, {:?}, {:?}",
+                    safety_rule_4, safety_rule_5, safety_rule_6
+                );
                 return None;
             }
         }
@@ -221,8 +225,8 @@ impl Core {
         if committing.view == block.qc.view && committing.digest() == block.qc.hash {
             self.store_block(&committing).await;
             self.last_committed_view = committing.view;
+            debug!("Committed {}", committing);
 
-            info!("Committed {}", committing);
             if let Err(e) = self.tx_commit.send(committing).await {
                 warn!("Failed to send block through the commit channel: {}", e);
             }
@@ -252,7 +256,7 @@ impl Core {
 
         // Add the new vote to our aggregator and see if we have a quorum.
         if let Some(qc) = self.aggregator.add_vote(vote.clone())? {
-            debug!("Assembled {:?}", qc);
+            info!("🧩 [QC Assembled] {}", qc);
 
             // Process the QC.
             self.update_high_qc(&qc);
@@ -362,7 +366,6 @@ impl Core {
 
         let view = View::new(checkpoint, round);
 
-        // TODO: This must be based on the batch logic
         let proposal = MakeProposal {
             view,
             // As of now this is not used

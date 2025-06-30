@@ -57,7 +57,7 @@ impl Proposer {
         )
         .await;
 
-        info!("Created {}", block);
+        info!("📦 [Produced Block] {}", block);
 
         // Broadcast our new block.
         debug!("Broadcasting {:?}", block);

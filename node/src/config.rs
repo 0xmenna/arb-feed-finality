@@ -61,7 +61,7 @@ impl Default for Parameters {
             consensus: ConsensusParameters::default(),
             proposal_min_interval: 300,
             transport_retry: 5000,
-            feed_source: "127.0.0.1:9642".to_string(),
+            feed_source: "ws://localhost:9642".to_string(),
             feed_poll_interval: 150,
         }
     }

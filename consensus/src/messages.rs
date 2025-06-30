@@ -1,6 +1,7 @@
 use crate::config::Committee;
 use crate::consensus::{ParentRound, View};
 use crate::error::{ConsensusError, ConsensusResult};
+use base64::write;
 use codec::{Decode, Encode};
 use crypto::{keccak, Digest, Hash, PublicKey, Signature, SignatureService};
 use std::collections::HashSet;
@@ -113,8 +114,18 @@ impl fmt::Debug for Block {
 }
 
 impl fmt::Display for Block {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "B({}, {})", self.view.checkpoint, self.view.round)
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "")?;
+        writeln!(f, "  🔢 View: {}", self.view)?;
+        writeln!(f, "  🗳️ QC: {}", self.qc)?;
+        writeln!(f, "  🧬 Parent Round: {}", self.parent_round)?;
+        writeln!(
+            f,
+            "  📈 Last Feed Sequence #: {}",
+            self.last_feed_sequence_number
+        )?;
+        writeln!(f, "  🖋️ Batch Poster Digest: {}", self.batch_poster_digest)?;
+        writeln!(f, "  🌿 Feed Merkle Root: {}", self.feed_merkle_root)
     }
 }
 
@@ -217,6 +228,19 @@ impl Hash for QC {
 impl fmt::Debug for QC {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "QC({}, {:?})", self.hash, self.view)
+    }
+}
+
+impl fmt::Display for QC {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "")?;
+        writeln!(f, "       🔑 Hash: {}", self.hash)?;
+        writeln!(f, "       🔢 View: {}", self.view)?;
+        writeln!(f, "       ✍️  Votes [{}] ", self.votes.len())?;
+        for (i, (pk, _)) in self.votes.iter().enumerate() {
+            writeln!(f, "           {}. 🧾 Voter: {}", i + 1, pk)?;
+        }
+        Ok(())
     }
 }
 

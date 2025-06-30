@@ -49,6 +49,12 @@ impl BigInt {
     }
 }
 
+impl std::fmt::Display for BigInt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl<'de> Deserialize<'de> for BigInt {
     fn deserialize<D>(deserializer: D) -> Result<BigInt, D::Error>
     where
