@@ -110,7 +110,7 @@ pub struct FeedSource {
 
 impl FeedSource {
     /// Spawns a new feed source that connects to the given feed URL and sends messages to the given channel.
-    pub async fn spawn(feed_url: String, tx: Sender<BroadcastMessage>, poll_interval: Interval) {
+    pub fn spawn(feed_url: String, tx: Sender<BroadcastMessage>, poll_interval: Interval) {
         tokio::spawn(async move {
             Self {
                 feed_url,
@@ -145,26 +145,26 @@ impl FeedSource {
         // Establish WebSocket connection to read the sequencer's feed
         let (stream, _) = connect_async(&self.feed_url).await?;
 
-        debug!("Successfully connected to the real-time feed");
+        log::info!("Successfully connected to the real-time feed");
 
         let (_, mut read) = stream.split();
 
         loop {
             self.poll_interval.tick().await;
 
-            match read.next().now_or_never().unwrap_or(None) {
-                Some(message_result) => match Self::process_message(message_result).await {
+            if let Some(msg_res) = read.next().now_or_never().unwrap_or_default() {
+                match Self::process_message(msg_res).await {
                     Ok(broadcast_msg) => {
+                        log::debug!(
+                            "Received broadcast messages starting from sequence number: {}",
+                            broadcast_msg.messages[0].sequence_number
+                        );
                         self.tx
                             .send(broadcast_msg)
                             .await
                             .expect("Failed to send feed");
                     }
-                    Err(err) => warn!("Message processing error: {:?}", err),
-                },
-                None => {
-                    warn!("Feed connection closed or interrupted.");
-                    return Err(anyhow::anyhow!("Feed connection lost."));
+                    Err(err) => debug!("Feed processing message error: {:?}", err),
                 }
             }
         }

@@ -50,15 +50,19 @@ pub trait Export: Serialize + DeserializeOwned {
 pub struct Parameters {
     pub consensus: ConsensusParameters,
     pub proposal_min_interval: u64,
-    pub retry_interval: u64,
+    pub transport_retry: u64,
+    pub feed_source: String,
+    pub feed_poll_interval: u64,
 }
 
 impl Default for Parameters {
     fn default() -> Self {
         Self {
             consensus: ConsensusParameters::default(),
-            proposal_min_interval: 150,
-            retry_interval: 5000,
+            proposal_min_interval: 300,
+            transport_retry: 5000,
+            feed_source: "ws://localhost:9642".to_string(),
+            feed_poll_interval: 150,
         }
     }
 }

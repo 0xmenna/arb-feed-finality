@@ -85,7 +85,7 @@ async fn main() {
             committee,
             parameters,
             store,
-        } => match Node::new(transport, &committee, &keys, &store, parameters) {
+        } => match Node::new(transport, &committee, &keys, &store, parameters).await {
             Ok(mut node) => {
                 tokio::spawn(async move {
                     node.analyze_block().await;
@@ -153,7 +153,7 @@ fn deploy_testbed(nodes: u16) -> Result<Vec<JoinHandle<()>>, Box<dyn std::error:
             let transport = transports[i].clone();
 
             Ok(tokio::spawn(async move {
-                match Node::new(transport, committee_file, &key_file, &store_path, None) {
+                match Node::new(transport, committee_file, &key_file, &store_path, None).await {
                     Ok(mut node) => {
                         // Sink the commit channel.
                         while node.commit.recv().await.is_some() {}
