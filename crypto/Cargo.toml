@@ -15,3 +15,4 @@ tiny-keccak = { version = "2.0.2", features = ["keccak"]}
 codec = { package = "parity-scale-codec", version = "3.6.9", default-features = false, features = [
 	"derive",
 ] }
+rs_merkle = "1.5.0"

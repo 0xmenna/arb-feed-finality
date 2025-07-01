@@ -183,27 +183,42 @@ impl Core {
             let checkpoint = self.high_qc.view.checkpoint;
             let round = self.high_qc.view.round;
 
-            let (round, checkpoint, digest) = match batch_res {
+            let (round, checkpoint, digest, merkle_root) = match batch_res {
                 BatchMakerResult::Ongoing(batch) => {
                     let round = round + 1;
                     let checkpoint = checkpoint;
 
-                    (round, checkpoint, batch.digest)
+                    (
+                        round,
+                        checkpoint,
+                        batch.digest,
+                        batch
+                            .merkle_root
+                            .expect("Batch should have a valid Merkle root"),
+                    )
                 }
                 BatchMakerResult::New(batch) => {
                     // Reset round for new batch
                     let round = 0;
                     let checkpoint = checkpoint + 1;
 
-                    (round, checkpoint, batch.digest)
+                    (
+                        round,
+                        checkpoint,
+                        batch.digest,
+                        batch
+                            .merkle_root
+                            .expect("Batch should have a valid Merkle root"),
+                    )
                 }
             };
 
             let safety_rule_4 = block.view.checkpoint == checkpoint;
             let safety_rule_5 = block.view.round == round;
             let safety_rule_6 = block.batch_poster_digest == digest;
+            let safety_rule_7 = block.feed_merkle_root == merkle_root;
 
-            if !(safety_rule_4 && safety_rule_5 && safety_rule_6) {
+            if !(safety_rule_4 && safety_rule_5 && safety_rule_6 && safety_rule_7) {
                 info!(
                     "Safety rules not satisfied: {:?}, {:?}, {:?}",
                     safety_rule_4, safety_rule_5, safety_rule_6
@@ -366,13 +381,17 @@ impl Core {
 
         let view = View::new(checkpoint, round);
 
+        let feed_merkle_root = batch
+            .merkle_root
+            .expect("Batch should have a valid Merkle root");
+
         let proposal = MakeProposal {
             view,
             // As of now this is not used
             parent_round: BigInt::default(),
             latest_msg_seq_num: batch.latest_seq_num,
             batch_poster_digest: batch.digest,
-            feed_merkle_root: Digest::default(),
+            feed_merkle_root,
             qc: self.high_qc.clone(),
         };
 

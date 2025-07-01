@@ -6,7 +6,7 @@ use crate::{
 };
 use brotli::CompressorWriter;
 use codec::Encode;
-use crypto::{keccak, Digest};
+use crypto::{keccak, merkle::MerkleTree, Digest};
 use evm::{abi, Address};
 use log::debug;
 use store::Store;
@@ -41,6 +41,7 @@ pub struct MiniBatchFeed {
 #[derive(Debug, Clone)]
 pub struct BuildingBatchMeta {
     pub digest: Digest,
+    pub merkle_root: Option<Digest>,
     pub latest_seq_num: u64,
     pub size: usize,
 }
@@ -52,6 +53,8 @@ struct OngoingBatch {
     size: usize,
     /// The building batch
     batch: BuildingBatch,
+    /// The merkle tree of the batch
+    merkle_tree: MerkleTree,
     /// Batch poster message of the batch with its digest
     batchposter_msg: Option<(Digest, BatchPosterMsg)>,
 }
@@ -66,6 +69,7 @@ impl OngoingBatch {
                 position.msg_count,
                 position.delayed_msg_count,
             ),
+            merkle_tree: MerkleTree::new(),
             batchposter_msg: None,
         }
     }
@@ -84,13 +88,16 @@ impl OngoingBatch {
             .add_message(&msg.message)
             .expect("Message must fit into batch segments");
 
+        let ins = self.merkle_tree.insert(msg.encode());
+        debug_assert!(ins.is_ok(), "The merkle tree is not expected to overflow");
+
         self.batch.msg_count = self.batch.msg_count.saturating_add(1);
     }
 
-    pub fn build_batchposter_digest(
+    pub fn build_batchposter_message(
         mut self,
         position: &BatchPosterPosition,
-    ) -> Result<(Self, Digest), anyhow::Error> {
+    ) -> Result<(Self, Digest, Option<Digest>), anyhow::Error> {
         // Build the batch digest
         let after_delayed_msg = self.batch.segments.delayed_msg();
         let (cloned_segments, msg) = self.batch.segments.close()?;
@@ -111,7 +118,9 @@ impl OngoingBatch {
 
         self.batchposter_msg = Some((batchposter_digest.clone(), batchposter_msg));
 
-        Ok((self, batchposter_digest))
+        let feed_merkle_root = self.merkle_tree.commit();
+
+        Ok((self, batchposter_digest, feed_merkle_root))
     }
 
     pub fn is_opened(&self) -> bool {
@@ -274,14 +283,15 @@ impl BatchMaker {
                     }
 
                     // Build the batchposter digest from the ongoing batch.
-                    let (batch, digest) = ongoing_batch
-                        .build_batchposter_digest(&self.batchposter_pos)
+                    let (batch, digest, merkle_root) = ongoing_batch
+                        .build_batchposter_message(&self.batchposter_pos)
                         .expect("Failed to close batch segments");
                     ongoing_batch = batch;
 
                     // Send either a new or ongoing batch result based on whether the batch was sealed.
                     let building_batch_meta = BuildingBatchMeta {
                         digest,
+                        merkle_root,
                         latest_seq_num,
                         size: ongoing_batch.size(),
                     };

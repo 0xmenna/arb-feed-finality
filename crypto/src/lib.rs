@@ -17,12 +17,28 @@ use tokio::sync::oneshot;
 #[path = "tests/crypto_tests.rs"]
 pub mod crypto_tests;
 pub mod keccak;
+pub mod merkle;
 
 pub type CryptoError = ed25519::Error;
 
 /// Represents a hash digest (32 bytes).
-#[derive(Hash, PartialEq, Default, Eq, Clone, Encode, Decode, Ord, PartialOrd)]
+#[derive(Hash, PartialEq, Default, Eq, Clone, Copy, Encode, Decode, Ord, PartialOrd)]
 pub struct Digest(pub [u8; 32]);
+
+impl Into<Vec<u8>> for Digest {
+    fn into(self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+
+impl TryFrom<Vec<u8>> for Digest {
+    type Error = TryFromSliceError;
+
+    fn try_from(item: Vec<u8>) -> Result<Self, Self::Error> {
+        let array: [u8; 32] = item.as_slice().try_into()?;
+        Ok(Digest(array))
+    }
+}
 
 impl Digest {
     pub fn to_vec(&self) -> Vec<u8> {
