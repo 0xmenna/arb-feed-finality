@@ -22,6 +22,9 @@ use tokio::time::{sleep, Instant};
 use transport::protocol::BLOCK_VOTES_TOPIC;
 use transport::Publisher;
 
+#[cfg(feature = "benchmark")]
+use crate::bench_log::BenchLogger;
+
 pub struct Core {
     name: PublicKey,
     committee: Committee,
@@ -45,6 +48,9 @@ pub struct Core {
     max_mini_batch_size: usize,
     rx_batch_res: Receiver<BatchMakerResult>,
     tx_commit_batch: Sender<Digest>,
+
+    #[cfg(feature = "benchmark")]
+    logger: BenchLogger,
 }
 
 impl Core {
@@ -68,6 +74,9 @@ impl Core {
     ) -> oneshot::Sender<()> {
         // Consensus core is being notified when the network is ready.
         let (ready_tx, ready_rx) = oneshot::channel();
+
+        #[cfg(feature = "benchmark")]
+        let logger = BenchLogger::new().expect("Failed to create benchmark logger");
 
         tokio::spawn(async move {
             Self {
@@ -93,6 +102,8 @@ impl Core {
                 max_mini_batch_size,
                 rx_batch_res,
                 tx_commit_batch,
+                #[cfg(feature = "benchmark")]
+                logger,
             }
             .run(ready_rx)
             .await
@@ -220,8 +231,8 @@ impl Core {
 
             if !(safety_rule_4 && safety_rule_5 && safety_rule_6 && safety_rule_7) {
                 info!(
-                    "Safety rules not satisfied: {:?}, {:?}, {:?}",
-                    safety_rule_4, safety_rule_5, safety_rule_6
+                    "Safety rules not satisfied: {:?}, {:?}, {:?}, {:?}",
+                    safety_rule_4, safety_rule_5, safety_rule_6, safety_rule_7
                 );
                 return None;
             }
@@ -273,6 +284,16 @@ impl Core {
         if let Some(qc) = self.aggregator.add_vote(vote.clone())? {
             info!("🧩 [QC Assembled] {}", qc);
 
+            #[cfg(feature = "benchmark")]
+            {
+                let finalization_duration = Instant::now().duration_since(self.last_proposal_time);
+
+                self.logger
+                    .set_data_at_finalization(finalization_duration.as_millis());
+
+                self.logger.log().expect("Failed to log benchmark data");
+            }
+
             // Process the QC.
             self.update_high_qc(&qc);
 
@@ -288,7 +309,6 @@ impl Core {
                 // Wait until some mini batch is not sent.
                 while !self.send_mini_batch().await {}
                 self.generate_proposal().await;
-                self.last_proposal_time = Instant::now();
             }
         }
         Ok(())
@@ -399,6 +419,19 @@ impl Core {
             .send(proposal)
             .await
             .expect("Failed to send message to proposer");
+
+        self.last_proposal_time = Instant::now();
+
+        #[cfg(feature = "benchmark")]
+        {
+            self.logger.set_data_at_proposal(
+                checkpoint,
+                round,
+                batch.size - self.logger.bench_data().block_batch_size,
+                batch.size,
+                batch.compressed_size,
+            );
+        }
     }
 
     #[async_recursion]

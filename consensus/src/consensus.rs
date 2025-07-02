@@ -91,7 +91,7 @@ impl Consensus {
             committee.clone(),
             signature_service.clone(),
             store.clone(),
-            /* rx_message */ rx_consensus,
+            rx_consensus,
             rx_loopback,
             tx_proposer,
             tx_commit,

@@ -1,6 +1,7 @@
 #[macro_use]
 mod error;
 mod aggregator;
+mod bench_log;
 mod config;
 mod consensus;
 mod core;

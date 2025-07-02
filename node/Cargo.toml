@@ -29,8 +29,3 @@ transport = { path = "../transport" }
 
 [features]
 benchmark = ["consensus/benchmark"]
-
-[[bin]]         
-name = "client"   
-path = "src/client.rs" 
-required-features = ["benchmark"] 

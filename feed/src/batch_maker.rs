@@ -44,13 +44,12 @@ pub struct BuildingBatchMeta {
     pub merkle_root: Option<Digest>,
     pub latest_seq_num: u64,
     pub size: usize,
+    pub compressed_size: usize,
 }
 
 struct OngoingBatch {
     /// The opening round of the ongoing building batch
     opening_round: Round,
-    /// The size of the batch (size of total messages in bytes)
-    size: usize,
     /// The building batch
     batch: BuildingBatch,
     /// The merkle tree of the batch
@@ -63,7 +62,6 @@ impl OngoingBatch {
     pub fn new(position: BatchPosterPosition) -> Self {
         Self {
             opening_round: 0,
-            size: 0,
             batch: BuildingBatch::new(
                 position.msg_count,
                 position.msg_count,
@@ -79,7 +77,11 @@ impl OngoingBatch {
     }
 
     fn size(&self) -> usize {
-        self.size
+        self.batch.size()
+    }
+
+    fn compressed_size(&self) -> usize {
+        self.batch.compressed_size()
     }
 
     pub fn add_message(&mut self, msg: &BroadcastFeedMessage) {
@@ -221,7 +223,7 @@ impl BatchMaker {
                 // Process incoming mini batches.
                 Some(mini_batch) = self.rx_mini_batch.recv() => {
                     // Compute the total size of the mini batch.
-                    let mini_batch_size = mini_batch.messages.iter()
+                    let mini_batch_size: usize = mini_batch.messages.iter()
                         .map(|msg| msg.message.message.l2_msg.size())
                         .sum();
 
@@ -269,8 +271,6 @@ impl BatchMaker {
                         // Reinitialize the ongoing batch, starting it with the mini batch's round.
                         ongoing_batch = OngoingBatch::new(self.batchposter_pos);
                         ongoing_batch.open(mini_batch.round);
-                        // Start the new batch with the size of the current mini batch.
-                        ongoing_batch.size = mini_batch_size;
                     }
                     // Process each message in the mini batch.
                     for msg in mini_batch.messages.iter() {
@@ -294,6 +294,7 @@ impl BatchMaker {
                         merkle_root,
                         latest_seq_num,
                         size: ongoing_batch.size(),
+                        compressed_size: ongoing_batch.compressed_size(),
                     };
                     let result = if seal_batch {
                         BatchMakerResult::New(building_batch_meta)
@@ -364,6 +365,14 @@ impl BuildingBatch {
             start_msg_count,
             msg_count,
         }
+    }
+
+    pub fn compressed_size(&self) -> usize {
+        self.segments.last_compressed_size
+    }
+
+    pub fn size(&self) -> usize {
+        self.segments.total_uncompressed_size
     }
 }
 
