@@ -8,7 +8,7 @@ use brotli::CompressorWriter;
 use codec::Encode;
 use crypto::{keccak, merkle::MerkleTree, Digest};
 use evm::{abi, Address};
-use log::debug;
+use log::{debug, info};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -80,10 +80,6 @@ impl OngoingBatch {
         self.batch.size()
     }
 
-    fn compressed_size(&self) -> usize {
-        self.batch.compressed_size()
-    }
-
     pub fn add_message(&mut self, msg: &BroadcastFeedMessage) {
         self.batch
             .segments
@@ -99,7 +95,7 @@ impl OngoingBatch {
     pub fn build_batchposter_message(
         mut self,
         position: &BatchPosterPosition,
-    ) -> Result<(Self, Digest, Option<Digest>), anyhow::Error> {
+    ) -> Result<(Self, Digest, usize, Option<Digest>), anyhow::Error> {
         // Build the batch digest
         let after_delayed_msg = self.batch.segments.delayed_msg();
         let (cloned_segments, msg) = self.batch.segments.close()?;
@@ -109,7 +105,7 @@ impl OngoingBatch {
 
         let batchposter_msg = BatchPosterMsg {
             sequence_number: position.next_seq_number,
-            msg,
+            msg: msg.clone(),
             after_delayed_msg,
             gas_refunder: Address::zero(), // TODO: think about this later
             prev_msg_count: position.msg_count,
@@ -122,7 +118,7 @@ impl OngoingBatch {
 
         let feed_merkle_root = self.merkle_tree.commit();
 
-        Ok((self, batchposter_digest, feed_merkle_root))
+        Ok((self, batchposter_digest, msg.len(), feed_merkle_root))
     }
 
     pub fn is_opened(&self) -> bool {
@@ -283,7 +279,7 @@ impl BatchMaker {
                     }
 
                     // Build the batchposter digest from the ongoing batch.
-                    let (batch, digest, merkle_root) = ongoing_batch
+                    let (batch, digest, msg_size, merkle_root) = ongoing_batch
                         .build_batchposter_message(&self.batchposter_pos)
                         .expect("Failed to close batch segments");
                     ongoing_batch = batch;
@@ -294,7 +290,7 @@ impl BatchMaker {
                         merkle_root,
                         latest_seq_num,
                         size: ongoing_batch.size(),
-                        compressed_size: ongoing_batch.compressed_size(),
+                        compressed_size: msg_size,
                     };
                     let result = if seal_batch {
                         BatchMakerResult::New(building_batch_meta)
@@ -365,10 +361,6 @@ impl BuildingBatch {
             start_msg_count,
             msg_count,
         }
-    }
-
-    pub fn compressed_size(&self) -> usize {
-        self.segments.last_compressed_size
     }
 
     pub fn size(&self) -> usize {

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 const DEFAULT_BENCHMARK_FILE: &str = "benchmark.csv";
 
-pub const UNIT_TX_SIZE: usize = 122;
+pub const UNIT_TX_SIZE: usize = 126;
 
 #[derive(Default)]
 pub struct BenchmarkData {
