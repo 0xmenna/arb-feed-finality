@@ -4,6 +4,7 @@
 db_*
 *.json
 *.log
+*.csv
 
 benchmark/client
 benchmark/node

@@ -22,6 +22,9 @@ use tokio::time::{sleep, Instant};
 use transport::protocol::BLOCK_VOTES_TOPIC;
 use transport::Publisher;
 
+#[cfg(feature = "benchmark")]
+use crate::bench_log::BenchLogger;
+
 pub struct Core {
     name: PublicKey,
     committee: Committee,
@@ -45,6 +48,9 @@ pub struct Core {
     max_mini_batch_size: usize,
     rx_batch_res: Receiver<BatchMakerResult>,
     tx_commit_batch: Sender<Digest>,
+
+    #[cfg(feature = "benchmark")]
+    logger: BenchLogger,
 }
 
 impl Core {
@@ -68,6 +74,9 @@ impl Core {
     ) -> oneshot::Sender<()> {
         // Consensus core is being notified when the network is ready.
         let (ready_tx, ready_rx) = oneshot::channel();
+
+        #[cfg(feature = "benchmark")]
+        let logger = BenchLogger::new().expect("Failed to create benchmark logger");
 
         tokio::spawn(async move {
             Self {
@@ -93,6 +102,8 @@ impl Core {
                 max_mini_batch_size,
                 rx_batch_res,
                 tx_commit_batch,
+                #[cfg(feature = "benchmark")]
+                logger,
             }
             .run(ready_rx)
             .await
@@ -183,45 +194,26 @@ impl Core {
             let checkpoint = self.high_qc.view.checkpoint;
             let round = self.high_qc.view.round;
 
-            let (round, checkpoint, digest, merkle_root) = match batch_res {
-                BatchMakerResult::Ongoing(batch) => {
-                    let round = round + 1;
-                    let checkpoint = checkpoint;
+            let (checkpoint, round) = if batch_res.closed_batch_digest.is_none() {
+                let round = round + 1;
+                (checkpoint, round)
+            } else {
+                // Reset round for new batch
+                let round = 0;
+                let checkpoint = checkpoint + 1;
 
-                    (
-                        round,
-                        checkpoint,
-                        batch.digest,
-                        batch
-                            .merkle_root
-                            .expect("Batch should have a valid Merkle root"),
-                    )
-                }
-                BatchMakerResult::New(batch) => {
-                    // Reset round for new batch
-                    let round = 0;
-                    let checkpoint = checkpoint + 1;
-
-                    (
-                        round,
-                        checkpoint,
-                        batch.digest,
-                        batch
-                            .merkle_root
-                            .expect("Batch should have a valid Merkle root"),
-                    )
-                }
+                (checkpoint, round)
             };
 
             let safety_rule_4 = block.view.checkpoint == checkpoint;
             let safety_rule_5 = block.view.round == round;
-            let safety_rule_6 = block.batch_poster_digest == digest;
-            let safety_rule_7 = block.feed_merkle_root == merkle_root;
+            let safety_rule_6 = block.batch_poster_digest == batch_res.closed_batch_digest;
+            let safety_rule_7 = block.feed_merkle_root == batch_res.merkle_root;
 
             if !(safety_rule_4 && safety_rule_5 && safety_rule_6 && safety_rule_7) {
                 info!(
-                    "Safety rules not satisfied: {:?}, {:?}, {:?}",
-                    safety_rule_4, safety_rule_5, safety_rule_6
+                    "Safety rules not satisfied: {:?}, {:?}, {:?}, {:?}",
+                    safety_rule_4, safety_rule_5, safety_rule_6, safety_rule_7
                 );
                 return None;
             }
@@ -273,6 +265,16 @@ impl Core {
         if let Some(qc) = self.aggregator.add_vote(vote.clone())? {
             info!("🧩 [QC Assembled] {}", qc);
 
+            #[cfg(feature = "benchmark")]
+            {
+                let finalization_duration = Instant::now().duration_since(self.last_proposal_time);
+
+                self.logger
+                    .set_data_at_finalization(finalization_duration.as_millis());
+
+                self.logger.log().expect("Failed to log benchmark data");
+            }
+
             // Process the QC.
             self.update_high_qc(&qc);
 
@@ -288,7 +290,6 @@ impl Core {
                 // Wait until some mini batch is not sent.
                 while !self.send_mini_batch().await {}
                 self.generate_proposal().await;
-                self.last_proposal_time = Instant::now();
             }
         }
         Ok(())
@@ -361,37 +362,29 @@ impl Core {
             .await
             .expect("Failed to receive batch result");
 
-        let (checkpoint, round, batch) = match batch_res {
-            BatchMakerResult::Ongoing(batch) => {
-                debug!("Batch is ongoing: {:?}", batch);
-                let round = round + 1;
-                let checkpoint = checkpoint;
+        let (checkpoint, round) = if batch_res.closed_batch_digest.is_none() {
+            // If there is no digest, then the batch has not been closed yet.
+            let round = round + 1;
+            let checkpoint = checkpoint;
 
-                (checkpoint, round, batch)
-            }
-            BatchMakerResult::New(batch) => {
-                debug!("New batch created: {:?}", batch);
-                // Reset round for new batch
-                let round = 0;
-                let checkpoint = checkpoint + 1;
+            (checkpoint, round)
+        } else {
+            // If there is a digest, then the batch has been closed, go to the next checkpoint.
+            let round = 0; // Reset round for new batch
+            let checkpoint = checkpoint + 1;
 
-                (checkpoint, round, batch)
-            }
+            (checkpoint, round)
         };
 
         let view = View::new(checkpoint, round);
-
-        let feed_merkle_root = batch
-            .merkle_root
-            .expect("Batch should have a valid Merkle root");
 
         let proposal = MakeProposal {
             view,
             // As of now this is not used
             parent_round: BigInt::default(),
-            latest_msg_seq_num: batch.latest_seq_num,
-            batch_poster_digest: batch.digest,
-            feed_merkle_root,
+            latest_msg_seq_num: batch_res.latest_seq_num,
+            batch_poster_digest: batch_res.closed_batch_digest,
+            feed_merkle_root: batch_res.merkle_root,
             qc: self.high_qc.clone(),
         };
 
@@ -399,6 +392,20 @@ impl Core {
             .send(proposal)
             .await
             .expect("Failed to send message to proposer");
+
+        self.last_proposal_time = Instant::now();
+
+        #[cfg(feature = "benchmark")]
+        {
+            let curr_size = self.logger.bench_data().block_batch_size;
+            let block_msg_size = if batch_res.size <= curr_size {
+                curr_size
+            } else {
+                batch_res.size - curr_size
+            };
+            self.logger
+                .set_data_at_proposal(checkpoint, round, block_msg_size, batch_res.size);
+        }
     }
 
     #[async_recursion]
@@ -465,6 +472,10 @@ impl Core {
                 Err(ConsensusError::StoreError(e)) => error!("{}", e),
                 Err(ConsensusError::CodecError(e)) => error!("Store corrupted. {}", e),
                 Err(e) => warn!("{}", e),
+            }
+
+            if self.rx_loopback.is_closed() && self.name == self.committee.leader {
+                info!("Loopback channel is closed");
             }
         }
     }
