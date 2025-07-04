@@ -26,11 +26,11 @@ type Round = u64;
 
 /// Whether to close the batch or not and the digest of the resulting batch
 #[derive(Debug, Clone)]
-pub enum BatchMakerResult {
-    /// The batch is ongoing and has not yet been closed
-    Ongoing(BuildingBatchMeta),
-    /// A new batch
-    New(BuildingBatchMeta),
+pub struct BatchMakerResult {
+    pub closed_batch_digest: Option<Digest>,
+    pub merkle_root: Digest,
+    pub latest_seq_num: u64,
+    pub size: usize,
 }
 
 pub struct MiniBatchFeed {
@@ -38,24 +38,15 @@ pub struct MiniBatchFeed {
     pub messages: Vec<BroadcastFeedMessage>,
 }
 
-#[derive(Debug, Clone)]
-pub struct BuildingBatchMeta {
-    pub digest: Digest,
-    pub merkle_root: Option<Digest>,
-    pub latest_seq_num: u64,
-    pub size: usize,
-    pub compressed_size: usize,
-}
-
 struct OngoingBatch {
     /// The opening round of the ongoing building batch
     opening_round: Round,
     /// The building batch
     batch: BuildingBatch,
+    /// The size of the batch in bytes (based on the added messages)
+    size: usize,
     /// The merkle tree of the batch
     merkle_tree: MerkleTree,
-    /// Batch poster message of the batch with its digest
-    batchposter_msg: Option<(Digest, BatchPosterMsg)>,
 }
 
 impl OngoingBatch {
@@ -67,8 +58,8 @@ impl OngoingBatch {
                 position.msg_count,
                 position.delayed_msg_count,
             ),
+            size: 0,
             merkle_tree: MerkleTree::new(),
-            batchposter_msg: None,
         }
     }
 
@@ -76,8 +67,8 @@ impl OngoingBatch {
         self.opening_round
     }
 
-    fn size(&self) -> usize {
-        self.batch.size()
+    fn commit_tree(&mut self) -> Option<Digest> {
+        self.merkle_tree.commit()
     }
 
     pub fn add_message(&mut self, msg: &BroadcastFeedMessage) {
@@ -86,20 +77,29 @@ impl OngoingBatch {
             .add_message(&msg.message)
             .expect("Message must fit into batch segments");
 
+        self.size += msg.message.message.l2_msg.size();
+
         let ins = self.merkle_tree.insert(msg.encode());
         debug_assert!(ins.is_ok(), "The merkle tree is not expected to overflow");
 
         self.batch.msg_count = self.batch.msg_count.saturating_add(1);
     }
 
-    pub fn build_batchposter_message(
-        mut self,
+    pub fn is_opened(&self) -> bool {
+        !(self.opening_round == 0)
+    }
+
+    pub fn open(&mut self, round: Round) {
+        self.opening_round = round;
+    }
+
+    pub fn close_batch(
+        self,
         position: &BatchPosterPosition,
-    ) -> Result<(Self, Digest, usize, Option<Digest>), anyhow::Error> {
+    ) -> Result<(Digest, BatchPosterMsg), anyhow::Error> {
         // Build the batch digest
         let after_delayed_msg = self.batch.segments.delayed_msg();
-        let (cloned_segments, msg) = self.batch.segments.close()?;
-        self.batch.segments = cloned_segments;
+        let msg = self.batch.segments.close()?;
 
         let msg = msg.unwrap_or_default();
 
@@ -114,27 +114,7 @@ impl OngoingBatch {
 
         let batchposter_digest = keccak::hash(batchposter_msg.encode());
 
-        self.batchposter_msg = Some((batchposter_digest.clone(), batchposter_msg));
-
-        let feed_merkle_root = self.merkle_tree.commit();
-
-        Ok((self, batchposter_digest, msg.len(), feed_merkle_root))
-    }
-
-    pub fn is_opened(&self) -> bool {
-        !(self.opening_round == 0)
-    }
-
-    pub fn open(&mut self, round: Round) {
-        self.opening_round = round;
-    }
-
-    pub fn close_batch(self) -> Result<(BuildingBatch, Digest, BatchPosterMsg), anyhow::Error> {
-        let (digest, batchposter) = self.batchposter_msg.ok_or_else(|| {
-            anyhow::anyhow!("Batchposter message must be present when closing the batch")
-        })?;
-
-        Ok((self.batch, digest, batchposter))
+        Ok((batchposter_digest, batchposter_msg))
     }
 }
 
@@ -226,7 +206,7 @@ impl BatchMaker {
                     assert!(mini_batch_size <= self.max_size, "The mini batch is not expected to exceed the maximum size");
 
                     // Check if adding this mini batch would exceed the ongoing batch size.
-                    let new_batch_size = ongoing_batch.size() + mini_batch_size;
+                    let new_batch_size = ongoing_batch.size + mini_batch_size;
                     let exceeds_size = new_batch_size > self.max_size;
 
                     // Open the ongoing batch if it isn’t already opened.
@@ -242,18 +222,16 @@ impl BatchMaker {
                     // Mark the batch for sealing if either condition is met.
                     seal_batch = exceeds_size || exceeds_rounds;
 
-                    // If the batch should be sealed, close it and prepare for a new batch.
-                    if seal_batch {
-                        let (batch, digest, batchposter_data) = ongoing_batch
-                            .close_batch()
+                    // If the batch should be sealed, close it and return the closed batch digest. Then, prepare for a new batch.
+                    let maybe_digest = if seal_batch {
+                        let (digest, batchposter_data) = ongoing_batch
+                            .close_batch(&self.batchposter_pos)
                             .expect("Batch is expected to be closed");
-
-                        // debug_assert!(committed_batch.is_none());
 
                         // Update the batch poster position for the next batch.
                         self.batchposter_pos = BatchPosterPosition {
-                            msg_count: batch.msg_count,
-                            delayed_msg_count: batch.segments.delayed_msg(),
+                            msg_count: batchposter_data.new_msg_count,
+                            delayed_msg_count: batchposter_data.after_delayed_msg,
                             next_seq_number: self.batchposter_pos.next_seq_number.saturating_add(1),
                         };
 
@@ -267,7 +245,12 @@ impl BatchMaker {
                         // Reinitialize the ongoing batch, starting it with the mini batch's round.
                         ongoing_batch = OngoingBatch::new(self.batchposter_pos);
                         ongoing_batch.open(mini_batch.round);
-                    }
+
+                        Some(digest)
+                    } else {
+                        None
+                    };
+
                     // Process each message in the mini batch.
                     for msg in mini_batch.messages.iter() {
                         debug!(
@@ -278,26 +261,14 @@ impl BatchMaker {
                         latest_seq_num = msg.sequence_number;
                     }
 
-                    // Build the batchposter digest from the ongoing batch.
-                    let (batch, digest, msg_size, merkle_root) = ongoing_batch
-                        .build_batchposter_message(&self.batchposter_pos)
-                        .expect("Failed to close batch segments");
-                    ongoing_batch = batch;
-
-                    // Send either a new or ongoing batch result based on whether the batch was sealed.
-                    let building_batch_meta = BuildingBatchMeta {
-                        digest,
-                        merkle_root,
+                    let res = BatchMakerResult {
+                        closed_batch_digest: maybe_digest,
+                        merkle_root: ongoing_batch.commit_tree().expect("Root is expected to be computed"),
                         latest_seq_num,
-                        size: ongoing_batch.size(),
-                        compressed_size: msg_size,
+                        size: ongoing_batch.size,
                     };
-                    let result = if seal_batch {
-                        BatchMakerResult::New(building_batch_meta)
-                    } else {
-                        BatchMakerResult::Ongoing(building_batch_meta)
-                    };
-                    self.tx_result.send(result).await.expect("Failed to send batch result");
+
+                    self.tx_result.send(res).await.expect("Failed to send batch result");
                 },
                 // Process commit commands.
                 Some(commit_digest) = self.rx_commit_batch.recv() => {
@@ -533,19 +504,7 @@ impl BatchSegments {
         self.delayed_msg
     }
 
-    pub fn close(mut self) -> anyhow::Result<(Self, Option<Vec<u8>>)> {
-        let cloned = Self {
-            compressed_writer: self.compressed_writer,
-            raw_segments: self.raw_segments.clone(),
-            delayed_msg: self.delayed_msg,
-            timestamp: self.timestamp,
-            block_num: self.block_num,
-            new_uncompressed_size: self.new_uncompressed_size,
-            total_uncompressed_size: self.total_uncompressed_size,
-            last_compressed_size: self.last_compressed_size,
-            trailing_headers: self.trailing_headers,
-        };
-
+    pub fn close(mut self) -> anyhow::Result<Option<Vec<u8>>> {
         // Remove trailing headers
         let len = self.raw_segments.len();
         self.raw_segments
@@ -573,13 +532,13 @@ impl BatchSegments {
         }
 
         if self.raw_segments.is_empty() {
-            return Ok((cloned, None));
+            return Ok(None);
         }
 
         self.compressed_writer.flush()?;
         let compressed_bytes = self.compressed_writer.into_inner();
-        let mut full_msg: Vec<u8> = vec![BROTLI_MESSAGE_HEADER_BYTE];
+        let mut full_msg = vec![BROTLI_MESSAGE_HEADER_BYTE];
         full_msg.extend_from_slice(&compressed_bytes);
-        Ok((cloned, Some(full_msg)))
+        Ok(Some(full_msg))
     }
 }

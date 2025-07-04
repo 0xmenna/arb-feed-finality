@@ -20,7 +20,7 @@ impl Default for Parameters {
             timeout_delay: 5_000,
             sync_retry_delay: 10_000,
             max_batch_size: 90_000,
-            max_batch_parent_rounds: 50,
+            max_batch_parent_rounds: 5,
         }
     }
 }

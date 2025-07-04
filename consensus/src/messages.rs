@@ -13,7 +13,7 @@ pub struct Block {
     pub qc: QC,
     pub parent_round: ParentRound,
     pub last_feed_sequence_number: u64,
-    pub batch_poster_digest: Digest,
+    pub batch_poster_digest: Option<Digest>,
     pub feed_merkle_root: Digest,
     pub signature: Signature,
 }
@@ -24,7 +24,7 @@ impl Block {
         view: View,
         parent_round: ParentRound,
         last_feed_sequence_number: u64,
-        batch_poster_digest: Digest,
+        batch_poster_digest: Option<Digest>,
         feed_merkle_root: Digest,
         mut signature_service: SignatureService,
     ) -> Self {
@@ -72,7 +72,7 @@ pub struct BlockPreImage {
     pub qc: QC,
     pub parent_round: ParentRound,
     pub last_feed_sequence_number: u64,
-    pub batch_poster_digest: Digest,
+    pub batch_poster_digest: Option<Digest>,
     pub feed_merkle_root: Digest,
 }
 
@@ -101,7 +101,7 @@ impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B({:?}, {:?}, {:?}, {}, {}, {})",
+            "{}: B({:?}, {:?}, {:?}, {}, {:?}, {})",
             self.digest(),
             self.view,
             self.qc,
@@ -124,7 +124,12 @@ impl fmt::Display for Block {
             "  📈 Last Feed Sequence #: {}",
             self.last_feed_sequence_number
         )?;
-        writeln!(f, "  🖋️ Batch Poster Digest: {}", self.batch_poster_digest)?;
+        let batch_poster_digest = if let Some(digest) = &self.batch_poster_digest {
+            digest.to_string()
+        } else {
+            "None".to_string()
+        };
+        writeln!(f, "  🖋️ Batch Poster Digest: {}", batch_poster_digest)?;
         writeln!(f, "  🌿 Feed Merkle Root: {}", self.feed_merkle_root)
     }
 }

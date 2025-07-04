@@ -13,7 +13,7 @@ pub struct MakeProposal {
     pub view: View,
     pub parent_round: ParentRound,
     pub latest_msg_seq_num: u64,
-    pub batch_poster_digest: Digest,
+    pub batch_poster_digest: Option<Digest>,
     pub feed_merkle_root: Digest,
     pub qc: QC,
 }
@@ -67,6 +67,10 @@ impl Proposer {
             .send((BLOCK_PROPOSALS_TOPIC, Bytes::from(message)))
             .await
             .expect("Failed to send block");
+
+        if self.tx_loopback.is_closed() {
+            panic!("Loopback channel is closed, cannot send block");
+        }
 
         // Send our block to the core for processing.
         self.tx_loopback
